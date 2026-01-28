@@ -1,0 +1,127 @@
+﻿from __future__ import annotations
+
+from aiogram import Router
+from aiogram.filters import Command
+from aiogram.types import Message
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.repos.settings import SettingsRepo
+
+router = Router()
+
+
+def _thread_id(m: Message) -> int | None:
+    return m.message_thread_id
+
+
+@router.message(Command("ping"))
+async def ping(m: Message) -> None:
+    await m.answer("pong")
+
+
+@router.message(Command("set_group"))
+async def set_group(m: Message, session: AsyncSession) -> None:
+    if not m.chat:
+        return
+    await SettingsRepo(session).update(group_chat_id=m.chat.id)
+    await m.reply(f"✅ group_chat_id = {m.chat.id}")
+
+
+@router.message(Command("set_inbox_topic"))
+async def set_inbox_topic(m: Message, session: AsyncSession) -> None:
+    tid = _thread_id(m)
+    if tid is None:
+        await m.reply("❌ Команду нужно отправить внутри топика (Topics).")
+        return
+    await SettingsRepo(session).update(inbox_topic_id=tid)
+    await m.reply(f"✅ inbox_topic_id = {tid}")
+
+
+@router.message(Command("set_service_topic"))
+async def set_service_topic(m: Message, session: AsyncSession) -> None:
+    tid = _thread_id(m)
+    if tid is None:
+        await m.reply("❌ Команду нужно отправить внутри топика (Topics).")
+        return
+    await SettingsRepo(session).update(service_topic_id=tid)
+    await m.reply(f"✅ service_topic_id (Редактирование) = {tid}")
+
+
+@router.message(Command("set_ready_topic"))
+async def set_ready_topic(m: Message, session: AsyncSession) -> None:
+    tid = _thread_id(m)
+    if tid is None:
+        await m.reply("❌ Команду нужно отправить внутри топика (Topics).")
+        return
+    await SettingsRepo(session).update(ready_topic_id=tid)
+    await m.reply(f"✅ ready_topic_id = {tid}")
+
+
+@router.message(Command("set_scheduled_topic"))
+async def set_scheduled_topic(m: Message, session: AsyncSession) -> None:
+    tid = _thread_id(m)
+    if tid is None:
+        await m.reply("❌ Команду нужно отправить внутри топика (Topics).")
+        return
+    await SettingsRepo(session).update(scheduled_topic_id=tid)
+    await m.reply(f"✅ scheduled_topic_id = {tid}")
+
+
+@router.message(Command("set_published_topic"))
+async def set_published_topic(m: Message, session: AsyncSession) -> None:
+    tid = _thread_id(m)
+    if tid is None:
+        await m.reply("❌ Команду нужно отправить внутри топика (Topics).")
+        return
+    await SettingsRepo(session).update(published_topic_id=tid)
+    await m.reply(f"✅ published_topic_id = {tid}")
+
+
+@router.message(Command("set_archive_topic"))
+async def set_archive_topic(m: Message, session: AsyncSession) -> None:
+    tid = _thread_id(m)
+    if tid is None:
+        await m.reply("❌ Команду нужно отправить внутри топика (Topics).")
+        return
+    await SettingsRepo(session).update(archive_topic_id=tid)
+    await m.reply(f"✅ archive_topic_id = {tid}")
+
+
+@router.message(Command("set_channel"))
+async def set_channel(m: Message, session: AsyncSession) -> None:
+    parts = (m.text or "").split()
+    if len(parts) < 2:
+        await m.reply("Формат: /set_channel <channel_id>  (например -1001234567890)")
+        return
+
+    raw = parts[1].strip()
+    if raw.startswith("@"):
+        await m.reply("❌ Для MVP используй numeric channel_id вида -100..., @username добавим позже.")
+        return
+
+    try:
+        cid = int(raw)
+    except ValueError:
+        await m.reply("❌ channel_id должен быть числом (например -100...).")
+        return
+
+    await SettingsRepo(session).update(channel_chat_id=cid)
+    await m.reply(f"✅ channel_chat_id = {cid}")
+
+
+@router.message(Command("status"))
+async def status(m: Message, session: AsyncSession) -> None:
+    s = await SettingsRepo(session).get_singleton()
+    lines = [
+        "BOT STATUS",
+        f"group_chat_id: {s.group_chat_id}",
+        f"inbox_topic_id: {s.inbox_topic_id}",
+        f"service_topic_id: {s.service_topic_id}",
+        f"ready_topic_id: {s.ready_topic_id}",
+        f"scheduled_topic_id: {s.scheduled_topic_id}",
+        f"published_topic_id: {s.published_topic_id}",
+        f"archive_topic_id: {s.archive_topic_id}",
+        f"channel_chat_id: {s.channel_chat_id}",
+        f"fetch_limit: {s.fetch_limit}",
+    ]
+    await m.answer("\n".join(lines), parse_mode=None)
