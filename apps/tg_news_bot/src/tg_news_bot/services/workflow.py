@@ -36,6 +36,7 @@ from tg_news_bot.services.edit_sessions import EditSessionService
 from tg_news_bot.services.rendering import render_card_text, render_post_content
 from tg_news_bot.services.metrics import metrics
 from tg_news_bot.services.scheduling import ScheduleService
+from tg_news_bot.services.source_text import sanitize_source_text
 from tg_news_bot.services.text_generation import TextPipeline, compose_post_text
 from tg_news_bot.services.workflow_types import DraftAction, TransitionRequest
 
@@ -235,8 +236,10 @@ class DraftWorkflowService:
                     article = await self._article_repo.get_by_id(session, draft.article_id)
                     if article and article.extracted_text:
                         source_text = article.extracted_text
+
+                source_text = sanitize_source_text(source_text)
                 if not source_text:
-                    source_text = draft.title_en
+                    source_text = (draft.title_en or "").strip()
                 if not source_text:
                     raise ValueError("draft has no source text to process")
 
@@ -502,3 +505,4 @@ class DraftWorkflowService:
             text = topic_value.strip().lower()
             return [text] if text else []
         return []
+

@@ -283,6 +283,7 @@ class TelegramPublisher:
         if (
             "message is not found" in message
             or "message to edit not found" in message
+            or "message to delete not found" in message
             or "message_id_invalid" in message
             or "message id invalid" in message
         ):

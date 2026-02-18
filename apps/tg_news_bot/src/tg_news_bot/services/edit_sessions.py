@@ -13,6 +13,7 @@ from tg_news_bot.db.models import Draft, EditSession, EditSessionStatus, ImageSt
 from tg_news_bot.ports.publisher import (
     PublisherEditNotAllowed,
     PublisherNotFound,
+    PublisherNotModified,
     PublisherPort,
 )
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
@@ -99,6 +100,9 @@ class EditSessionService:
                 )
             except (PublisherNotFound, PublisherEditNotAllowed):
                 instruction_id = None
+            except PublisherNotModified:
+                # Instruction is already up to date; keep current message id.
+                pass
 
         if not instruction_id:
             sent = await self._publisher.send_text(

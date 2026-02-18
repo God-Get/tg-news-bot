@@ -13,6 +13,7 @@ from tg_news_bot.db.models import (
     EditSession,
     EditSessionStatus,
 )
+from tg_news_bot.ports.publisher import PublisherNotModified
 from tg_news_bot.services.edit_sessions import EditPayload, EditSessionService
 
 
@@ -192,6 +193,33 @@ class _Publisher:
         self.deleted_message_ids.append(message_id)
 
 
+@dataclass
+class _InstructionNotModifiedPublisher(_Publisher):
+    edit_instruction_calls: int = 0
+
+    async def edit_text(
+        self,
+        *,
+        chat_id: int,  # noqa: ARG002
+        message_id: int,  # noqa: ARG002
+        text: str,  # noqa: ARG002
+        keyboard=None,  # noqa: ANN001
+        parse_mode: str | None = None,  # noqa: ARG002
+        disable_web_page_preview: bool = False,  # noqa: ARG002
+    ) -> None:
+        if keyboard is not None:
+            self.edit_instruction_calls += 1
+            raise PublisherNotModified("message is not modified")
+        await super().edit_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            keyboard=keyboard,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+
+
 @pytest.mark.asyncio
 async def test_ten_edit_cycles_do_not_accumulate_tail_messages() -> None:
     draft = Draft(
@@ -308,3 +336,51 @@ async def test_apply_edit_rolls_back_new_post_if_card_create_fails() -> None:
     assert draft.card_message_id is None
     assert 1000 in publisher.deleted_message_ids
     assert active_session.status == EditSessionStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_start_ignores_not_modified_for_existing_instruction() -> None:
+    draft = Draft(
+        id=3,
+        state=DraftState.EDITING,
+        normalized_url="https://example.com/article3",
+        domain="example.com",
+        title_en="Title",
+        post_text_ru="init",
+        group_chat_id=-1001,
+        topic_id=12,
+    )
+    settings_repo = _SettingsRepo(BotSettings(group_chat_id=-1001, editing_topic_id=12))
+    draft_repo = _DraftRepo(draft)
+    edit_repo = _EditRepo(
+        sessions=[
+            EditSession(
+                id=1,
+                draft_id=3,
+                group_chat_id=-1001,
+                topic_id=12,
+                user_id=10,
+                instruction_message_id=777,
+                status=EditSessionStatus.ACTIVE,
+                started_at=datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            )
+        ],
+        next_id=2,
+    )
+    publisher = _InstructionNotModifiedPublisher(next_message_id=2000)
+    service = EditSessionService(
+        publisher,
+        settings_repo=settings_repo,
+        draft_repo=draft_repo,
+        edit_repo=edit_repo,
+    )
+    session = _Session()
+
+    await service.start(session, draft_id=3, user_id=10)
+
+    active = await edit_repo.get_active_by_draft(session, 3)
+    assert active is not None
+    assert active.instruction_message_id == 777
+    assert publisher.edit_instruction_calls == 1
+    assert publisher.instruction_message_ids == []

@@ -18,6 +18,7 @@ from tg_news_bot.logging import get_logger
 from tg_news_bot.ports.publisher import PublisherPort
 from tg_news_bot.repositories.sources import SourceRepository
 from tg_news_bot.services.ingestion import IngestionRunner, IngestionStats
+from tg_news_bot.services.workflow import DraftWorkflowService
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 
 log = get_logger(__name__)
@@ -31,6 +32,7 @@ class SettingsContext:
     source_repository: SourceRepository
     publisher: PublisherPort
     ingestion_runner: IngestionRunner | None = None
+    workflow: DraftWorkflowService | None = None
 
 
 def create_settings_router(context: SettingsContext) -> Router:
@@ -60,6 +62,19 @@ def create_settings_router(context: SettingsContext) -> Router:
             if value and value not in unique:
                 unique.append(value)
         return unique
+
+    def parse_id_range(raw: str) -> tuple[int, int] | None:
+        parts = raw.strip().split()
+        if len(parts) != 2:
+            return None
+        try:
+            first = int(parts[0])
+            second = int(parts[1])
+        except ValueError:
+            return None
+        if first <= 0 or second <= 0:
+            return None
+        return min(first, second), max(first, second)
 
     def render_ingestion_stats(stats: IngestionStats) -> str:
         lines = [
@@ -807,6 +822,93 @@ def create_settings_router(context: SettingsContext) -> Router:
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             text=render_ingestion_stats(stats),
+        )
+
+    @router.message(Command("process_range"))
+    async def process_range(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.workflow is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Workflow недоступен в текущей конфигурации.",
+            )
+            return
+        if not command.args:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /process_range <from_id> <to_id>",
+            )
+            return
+        parsed = parse_id_range(command.args)
+        if not parsed:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Нужно указать два положительных числовых draft_id.",
+            )
+            return
+        start_id, end_id = parsed
+        total = end_id - start_id + 1
+        max_batch = 200
+        if total > max_batch:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Слишком большой диапазон ({total}). Максимум: {max_batch}.",
+            )
+            return
+
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"Запускаю выжимку и перевод для Draft #{start_id}..#{end_id}",
+        )
+
+        processed = 0
+        skipped_not_found = 0
+        skipped_not_editing = 0
+        skipped_no_source = 0
+        failed: list[int] = []
+
+        for draft_id in range(start_id, end_id + 1):
+            try:
+                await context.workflow.process_editing_text(draft_id=draft_id)
+                processed += 1
+            except LookupError:
+                skipped_not_found += 1
+            except ValueError as exc:
+                message_text = str(exc).lower()
+                if "editing" in message_text:
+                    skipped_not_editing += 1
+                elif "source text" in message_text:
+                    skipped_no_source += 1
+                else:
+                    failed.append(draft_id)
+            except Exception:
+                log.exception("settings.process_range_failed", draft_id=draft_id)
+                failed.append(draft_id)
+
+        lines = [
+            f"Готово. Диапазон: #{start_id}..#{end_id}",
+            f"Обработано: {processed}",
+            f"Пропущено (нет Draft): {skipped_not_found}",
+            f"Пропущено (не в EDITING): {skipped_not_editing}",
+            f"Пропущено (нет source text): {skipped_no_source}",
+            f"Ошибки: {len(failed)}",
+        ]
+        if failed:
+            failed_preview = ", ".join(str(item) for item in failed[:20])
+            if len(failed) > 20:
+                failed_preview = f"{failed_preview}, ..."
+            lines.append(f"Draft с ошибками: {failed_preview}")
+
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
         )
 
     return router

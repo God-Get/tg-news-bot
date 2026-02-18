@@ -30,6 +30,7 @@ from tg_news_bot.services.keyboards import build_state_keyboard
 from tg_news_bot.services.metrics import metrics
 from tg_news_bot.services.rendering import render_card_text, render_post_content
 from tg_news_bot.services.scoring import ScoringService
+from tg_news_bot.services.source_text import sanitize_source_text
 from tg_news_bot.services.text_generation import (
     LLMCircuitOpenError,
     StubSummarizer,
@@ -330,7 +331,7 @@ class IngestionRunner:
 
         extracted = self._extractor.extract(html)
         title_en = entry.get("title") or extracted.title
-        text_en = extracted.text
+        text_en = sanitize_source_text(extracted.text)
 
         published_at = self._parse_published(entry)
         score = self._scoring.score(

@@ -245,3 +245,30 @@ async def test_process_editing_text_prefers_article_source_over_post_text() -> N
 
     assert len(pipeline.calls) == 1
     assert pipeline.calls[0]["text_en"] == "Article source text"
+
+
+@pytest.mark.asyncio
+async def test_process_editing_text_strips_metadata_prefix_from_source() -> None:
+    draft = _editing_draft()
+    draft.extracted_text = None
+    draft.article_id = 77
+    draft.post_text_ru = "Incoming post text"
+    pipeline = _TextPipelineStub()
+    workflow = DraftWorkflowService(
+        session_factory=_SessionFactory(),
+        publisher=_PublisherSpy(),
+        draft_repo=_DraftRepo(draft),
+        source_repo=_SourceRepo(tags={"topics": ["AI"]}),
+        article_repo=_ArticleRepo(
+            extracted_text=(
+                "Date: - November 17, 2025 - Source: - Florida State University - Summary: "
+                "Researchers found a robust signal in long-term data."
+            )
+        ),
+        text_pipeline=pipeline,
+    )
+
+    await workflow.process_editing_text(draft_id=1)
+
+    assert len(pipeline.calls) == 1
+    assert pipeline.calls[0]["text_en"] == "Researchers found a robust signal in long-term data."

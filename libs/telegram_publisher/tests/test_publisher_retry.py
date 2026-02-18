@@ -104,3 +104,15 @@ async def test_edit_text_maps_message_id_invalid_to_not_found() -> None:
             keyboard=None,
             parse_mode=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_delete_message_maps_message_to_delete_not_found_to_not_found() -> None:
+    async def delete_message(**kwargs):  # noqa: ANN003, ARG001
+        raise _bad_request_exception("Bad Request: message to delete not found")
+
+    bot = SimpleNamespace(delete_message=delete_message)
+    publisher = TelegramPublisher(bot)
+
+    with pytest.raises(PublisherNotFound):
+        await publisher.delete_message(chat_id=123, message_id=77)

@@ -60,16 +60,6 @@ async def _run() -> int:
         ),
     )
 
-    settings_context = SettingsContext(
-        settings=settings,
-        session_factory=session_factory,
-        repository=BotSettingsRepository(),
-        source_repository=SourceRepository(),
-        publisher=publisher,
-        ingestion_runner=ingestion,
-    )
-    dispatcher.include_router(create_settings_router(settings_context))
-
     workflow_text_pipeline = build_text_pipeline(
         settings.text_generation,
         settings.llm,
@@ -80,6 +70,18 @@ async def _run() -> int:
         post_formatting=settings.post_formatting,
         text_pipeline=workflow_text_pipeline,
     )
+
+    settings_context = SettingsContext(
+        settings=settings,
+        session_factory=session_factory,
+        repository=BotSettingsRepository(),
+        source_repository=SourceRepository(),
+        publisher=publisher,
+        ingestion_runner=ingestion,
+        workflow=workflow,
+    )
+    dispatcher.include_router(create_settings_router(settings_context))
+
     edit_service = EditSessionService(publisher)
     edit_context = EditContext(
         settings=settings,
