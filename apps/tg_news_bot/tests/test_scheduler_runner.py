@@ -133,14 +133,19 @@ class _WorkflowSpy:
         self.publish_calls = 0
         self.move_calls = 0
         self.fail_publish = False
+        self.fail_move = False
 
     async def _publish_now(self, session, draft, settings) -> None:  # noqa: ANN001
         self.publish_calls += 1
+        draft.published_message_id = 700 + self.publish_calls
+        draft.published_at = datetime.now(timezone.utc)
         if self.fail_publish:
             raise RuntimeError("publish failed")
 
     async def _move_in_group(self, *, session, draft, settings, target_state) -> None:  # noqa: ANN001
         self.move_calls += 1
+        if self.fail_move:
+            raise RuntimeError("move failed")
 
 
 
@@ -319,3 +324,46 @@ async def test_scheduler_cancels_due_row_if_draft_not_scheduled() -> None:
     assert workflow.publish_calls == 0
     assert workflow.move_calls == 0
     assert due_row.status == ScheduledPostStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_scheduler_retry_after_move_failure_does_not_republish() -> None:
+    due_row = _ScheduledRow(
+        draft_id=6,
+        status=ScheduledPostStatus.SCHEDULED,
+        schedule_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    drafts = {6: _make_draft(6, DraftState.SCHEDULED)}
+    workflow = _WorkflowSpy()
+    workflow.fail_move = True
+    failure_repo = _PublishFailureRepo()
+
+    runner = SchedulerRunner(
+        session_factory=_DummySessionFactory(_DummySession()),
+        workflow=workflow,
+        config=SchedulerConfig(
+            poll_interval_seconds=10,
+            batch_size=20,
+            max_publish_attempts=3,
+            retry_backoff_seconds=60,
+        ),
+        scheduled_repo=_ScheduledRepo([due_row]),
+        draft_repo=_DraftRepo(drafts),
+        settings_repo=_SettingsRepo(),
+        publish_failure_repo=failure_repo,
+    )
+
+    await runner._process_due()
+
+    assert workflow.publish_calls == 1
+    assert due_row.status == ScheduledPostStatus.FAILED
+    assert due_row.next_retry_at is not None
+
+    due_row.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    workflow.fail_move = False
+    await runner._process_due()
+
+    assert workflow.publish_calls == 1
+    assert workflow.move_calls == 2
+    assert due_row.status == ScheduledPostStatus.PUBLISHED
+    assert drafts[6].state == DraftState.PUBLISHED

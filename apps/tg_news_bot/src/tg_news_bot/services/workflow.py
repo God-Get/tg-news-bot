@@ -67,6 +67,7 @@ class DraftWorkflowService:
                 draft = await self._draft_repo.get_for_update(session, request.draft_id)
                 settings = await self._settings_repo.get_or_create(session)
                 source_state = draft.state
+                move_handled = False
 
                 target_state = self._resolve_target_state(
                     draft.state, request.action
@@ -85,7 +86,24 @@ class DraftWorkflowService:
 
                 if request.action in {DraftAction.PUBLISH_NOW, DraftAction.REPOST}:
                     try:
-                        await self._publish_now(session, draft, settings)
+                        should_publish = not (
+                            request.action == DraftAction.PUBLISH_NOW
+                            and self._has_published_channel_message(draft)
+                        )
+                        if should_publish:
+                            await self._publish_now(session, draft, settings)
+                        should_move = not (
+                            request.action == DraftAction.SCHEDULE
+                            and source_state == DraftState.SCHEDULED
+                        )
+                        if should_move:
+                            await self._move_in_group(
+                                session=session,
+                                draft=draft,
+                                settings=settings,
+                                target_state=target_state,
+                            )
+                            move_handled = True
                         await self._publish_failure_repo.mark_resolved_for_draft(
                             session,
                             draft_id=draft.id,
@@ -106,19 +124,20 @@ class DraftWorkflowService:
                             session, draft_id=draft.id
                         )
 
-                should_move = not (
-                    request.action == DraftAction.SCHEDULE
-                    and source_state == DraftState.SCHEDULED
-                )
-                if should_move:
-                    await self._move_in_group(
-                        session=session,
-                        draft=draft,
-                        settings=settings,
-                        target_state=target_state,
+                if not move_handled:
+                    should_move = not (
+                        request.action == DraftAction.SCHEDULE
+                        and source_state == DraftState.SCHEDULED
                     )
-                elif target_state == DraftState.SCHEDULED:
-                    await self._refresh_scheduled_messages(session=session, draft=draft)
+                    if should_move:
+                        await self._move_in_group(
+                            session=session,
+                            draft=draft,
+                            settings=settings,
+                            target_state=target_state,
+                        )
+                    elif target_state == DraftState.SCHEDULED:
+                        await self._refresh_scheduled_messages(session=session, draft=draft)
 
                 draft.state = target_state
                 if source_state != target_state:
@@ -374,3 +393,7 @@ class DraftWorkflowService:
         if not topic_id:
             raise RuntimeError(f"topic_id for {state} is not configured")
         return int(topic_id)
+
+    @staticmethod
+    def _has_published_channel_message(draft: Draft) -> bool:
+        return bool(draft.published_message_id)

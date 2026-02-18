@@ -82,7 +82,8 @@ class SchedulerRunner:
                         continue
 
                     try:
-                        await self._workflow._publish_now(session, draft, settings)
+                        if not draft.published_message_id:
+                            await self._workflow._publish_now(session, draft, settings)
                         await self._workflow._move_in_group(
                             session=session,
                             draft=draft,

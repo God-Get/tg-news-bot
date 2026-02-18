@@ -120,6 +120,7 @@ class SpyWorkflow(DraftWorkflowService):
         self.move_calls = 0
         self.publish_calls = 0
         self.refresh_scheduled_calls = 0
+        self.fail_move = False
         super().__init__(
             session_factory=DummySessionFactory(self.session),
             publisher=object(),
@@ -132,9 +133,15 @@ class SpyWorkflow(DraftWorkflowService):
 
     async def _move_in_group(self, *, session, draft, settings, target_state) -> None:  # noqa: ANN001, D401
         self.move_calls += 1
+        if self.fail_move:
+            raise RuntimeError("move failed")
 
     async def _publish_now(self, session, draft, settings) -> None:  # noqa: ANN001, D401
         self.publish_calls += 1
+        if draft.published_message_id is None:
+            draft.published_message_id = 999
+        if draft.published_at is None:
+            draft.published_at = datetime.now(timezone.utc)
 
     async def _refresh_scheduled_messages(self, *, session, draft) -> None:  # noqa: ANN001, D401
         self.refresh_scheduled_calls += 1
@@ -178,6 +185,27 @@ async def test_publish_now_is_idempotent() -> None:
     assert workflow.publish_calls == 1
     assert workflow.move_calls == 1
     assert workflow.publish_failures.resolved == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_now_retry_after_move_failure_does_not_republish() -> None:
+    draft = _make_draft(state=DraftState.READY)
+    workflow = SpyWorkflow(draft=draft)
+    workflow.fail_move = True
+    request = TransitionRequest(draft_id=1, action=DraftAction.PUBLISH_NOW, user_id=1)
+
+    with pytest.raises(RuntimeError, match="move failed"):
+        await workflow.transition(request)
+
+    assert workflow.publish_calls == 1
+    assert workflow.publish_failures.created == 1
+
+    workflow.fail_move = False
+    await workflow.transition(request)
+
+    assert workflow.publish_calls == 1
+    assert workflow.move_calls == 2
+    assert draft.state == DraftState.PUBLISHED
 
 
 @pytest.mark.asyncio
