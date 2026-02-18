@@ -6,7 +6,7 @@ import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.methods import DeleteMessage, SendMessage
 
-from telegram_publisher.exceptions import PublisherEditNotAllowed
+from telegram_publisher.exceptions import PublisherEditNotAllowed, PublisherNotFound
 from telegram_publisher.publisher import TelegramPublisher
 
 
@@ -86,3 +86,21 @@ async def test_delete_message_maps_cant_be_deleted_to_edit_not_allowed() -> None
 
     with pytest.raises(PublisherEditNotAllowed):
         await publisher.delete_message(chat_id=123, message_id=77)
+
+
+@pytest.mark.asyncio
+async def test_edit_text_maps_message_id_invalid_to_not_found() -> None:
+    async def edit_message_text(**kwargs):  # noqa: ANN003, ARG001
+        raise _bad_request_exception("Bad Request: MESSAGE_ID_INVALID")
+
+    bot = SimpleNamespace(edit_message_text=edit_message_text)
+    publisher = TelegramPublisher(bot)
+
+    with pytest.raises(PublisherNotFound):
+        await publisher.edit_text(
+            chat_id=123,
+            message_id=77,
+            text="x",
+            keyboard=None,
+            parse_mode=None,
+        )

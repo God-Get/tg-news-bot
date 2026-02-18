@@ -38,6 +38,7 @@ class _WorkflowSpy:
     show_calls: list[dict] = field(default_factory=list)
     restore_calls: list[int] = field(default_factory=list)
     transition_calls: list[object] = field(default_factory=list)
+    process_calls: list[int] = field(default_factory=list)
     transition_exc: Exception | None = None
 
     async def show_schedule_menu(
@@ -66,6 +67,9 @@ class _WorkflowSpy:
         if self.transition_exc:
             raise self.transition_exc
         self.transition_calls.append(request)
+
+    async def process_editing_text(self, *, draft_id: int) -> None:
+        self.process_calls.append(draft_id)
 
 
 @dataclass
@@ -346,6 +350,20 @@ async def test_cancel_edit_callback_uses_edit_session_service() -> None:
 
     assert edit_sessions.cancel_calls == [22]
     assert query.answers == [None]
+
+
+@pytest.mark.asyncio
+async def test_process_now_callback_triggers_processing() -> None:
+    workflow = _WorkflowSpy()
+    edit_sessions = _EditSessionsSpy()
+    schedule_input = _ScheduleInputSpy()
+    handler = _get_handler(_make_context(workflow, edit_sessions, schedule_input))
+    query = _Query(data="draft:22:process_now")
+
+    await handler(query)
+
+    assert workflow.process_calls == [22]
+    assert query.answers == ["Выжимка и перевод обновлены"]
 
 
 @pytest.mark.asyncio

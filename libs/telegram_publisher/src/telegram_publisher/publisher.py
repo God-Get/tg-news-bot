@@ -280,6 +280,11 @@ class TelegramPublisher:
             raise PublisherEditNotAllowed(str(exc)) from exc
         if "message can't be edited" in message:
             raise PublisherEditNotAllowed(str(exc)) from exc
-        if "message is not found" in message or "message to edit not found" in message:
+        if (
+            "message is not found" in message
+            or "message to edit not found" in message
+            or "message_id_invalid" in message
+            or "message id invalid" in message
+        ):
             raise PublisherNotFound(str(exc)) from exc
         raise exc

@@ -66,6 +66,11 @@ def create_callback_router(context: CallbackContext) -> Router:
                 await safe_answer(query)
                 return
 
+            if parsed.action == "process_now":
+                await context.workflow.process_editing_text(draft_id=parsed.draft_id)
+                await safe_answer(query, text="Выжимка и перевод обновлены")
+                return
+
             if parsed.action == "schedule_open":
                 await context.workflow.show_schedule_menu(
                     draft_id=parsed.draft_id,

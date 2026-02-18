@@ -20,6 +20,7 @@ from tg_news_bot.services.health import HealthServer
 from tg_news_bot.services.ingestion import IngestionConfig, IngestionRunner
 from tg_news_bot.services.schedule_input import ScheduleInputService
 from tg_news_bot.services.scheduler import SchedulerConfig, SchedulerRunner
+from tg_news_bot.services.text_generation import build_text_pipeline
 from tg_news_bot.services.workflow import DraftWorkflowService
 from tg_news_bot.telegram.handlers.callbacks import CallbackContext, create_callback_router
 from tg_news_bot.telegram.handlers.editing import EditContext, create_edit_router
@@ -69,10 +70,15 @@ async def _run() -> int:
     )
     dispatcher.include_router(create_settings_router(settings_context))
 
+    workflow_text_pipeline = build_text_pipeline(
+        settings.text_generation,
+        settings.llm,
+    )
     workflow = DraftWorkflowService(
         session_factory,
         publisher,
         post_formatting=settings.post_formatting,
+        text_pipeline=workflow_text_pipeline,
     )
     edit_service = EditSessionService(publisher)
     edit_context = EditContext(

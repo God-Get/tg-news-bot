@@ -34,39 +34,111 @@ def render_post_content(
         limit=fmt.hashtags_limit,
         fallback=fmt.fallback_hashtag,
     )
-    title = f"<b>{escape(title)}</b>"
-    body = escape(body)
+    title_markup = f"<b>{escape(title)}</b>"
     hashtags_text = escape(" ".join(hashtags) if hashtags else "")
     source_text = (
         f'<a href="{escape(draft.normalized_url, quote=True)}">{escape(fmt.source_label)}</a>'
         if include_source_text
         else ""
     )
-
-    section_values = {
-        "title": title,
-        "body": body,
-        "hashtags": hashtags_text,
-        "source": source_text,
-    }
-
     ordered_sections = _ordered_sections(fmt.sections_order)
-    sections = [section_values[name] for name in ordered_sections if section_values.get(name)]
-    text = fmt.section_separator.join(sections)
-    if not text:
+
+    def build_text(body_plain: str) -> str:
+        section_values = {
+            "title": title_markup,
+            "body": escape(body_plain),
+            "hashtags": hashtags_text,
+            "source": source_text,
+        }
+        sections = [section_values[name] for name in ordered_sections if section_values.get(name)]
+        text_value = fmt.section_separator.join(sections)
+        if text_value:
+            return text_value
         if include_source_text:
-            text = (
+            return (
                 f'<a href="{escape(draft.normalized_url, quote=True)}">'
                 f"{escape(fmt.source_label)}</a>"
             )
-        else:
-            text = DEFAULT_BODY
+        return DEFAULT_BODY
+
+    text = build_text(body)
 
     max_len = CAPTION_MAX_LEN if photo else MESSAGE_MAX_LEN
     if len(text) > max_len:
-        text = text[: max_len - 1].rstrip() + "…"
+        text = _fit_html_text_to_limit(
+            max_len=max_len,
+            full_body_plain=body,
+            build_text=build_text,
+        )
 
     return PostContent(text=text, photo=photo, parse_mode=parse_mode)
+
+
+def _fit_html_text_to_limit(
+    *,
+    max_len: int,
+    full_body_plain: str,
+    build_text,
+) -> str:
+    current = build_text(full_body_plain)
+    if len(current) <= max_len:
+        return current
+
+    low = 0
+    high = len(full_body_plain)
+    best_text = ""
+    while low <= high:
+        mid = (low + high) // 2
+        candidate_body = full_body_plain[:mid].rstrip()
+        if mid < len(full_body_plain):
+            candidate_body = candidate_body.rstrip()
+            if candidate_body:
+                candidate_body = f"{candidate_body}…"
+            else:
+                candidate_body = "…"
+        candidate_text = build_text(candidate_body)
+        if len(candidate_text) <= max_len:
+            best_text = candidate_text
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    if best_text:
+        return best_text
+    return _truncate_html_preserving_tags(current, max_len=max_len)
+
+
+def _truncate_html_preserving_tags(text: str, *, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    if max_len <= 1:
+        return "…"
+
+    clipped = text[: max_len - 1].rstrip()
+    clipped = _trim_unfinished_html_tag(clipped)
+
+    open_b = clipped.count("<b>") - clipped.count("</b>")
+    open_a = len(re.findall(r"<a\s+[^>]*>", clipped)) - clipped.count("</a>")
+    suffix = ""
+    if open_a > 0:
+        suffix += "</a>" * open_a
+    if open_b > 0:
+        suffix += "</b>" * open_b
+
+    allowed = max_len - 1 - len(suffix)
+    if allowed <= 0:
+        return "…"
+    clipped = clipped[:allowed].rstrip()
+    clipped = _trim_unfinished_html_tag(clipped)
+    return f"{clipped}…{suffix}"
+
+
+def _trim_unfinished_html_tag(text: str) -> str:
+    last_lt = text.rfind("<")
+    last_gt = text.rfind(">")
+    if last_lt > last_gt:
+        return text[:last_lt].rstrip()
+    return text
 
 
 def _ordered_sections(raw_order: str) -> list[str]:

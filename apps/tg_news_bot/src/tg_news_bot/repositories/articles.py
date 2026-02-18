@@ -12,6 +12,10 @@ from tg_news_bot.utils.url import normalize_title_key
 
 
 class ArticleRepository:
+    async def get_by_id(self, session: AsyncSession, article_id: int) -> Article | None:
+        result = await session.execute(select(Article).where(Article.id == article_id))
+        return result.scalar_one_or_none()
+
     async def get_by_normalized_url(self, session: AsyncSession, url: str) -> Article | None:
         result = await session.execute(select(Article).where(Article.normalized_url == url))
         return result.scalar_one_or_none()

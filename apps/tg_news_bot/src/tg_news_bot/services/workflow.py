@@ -22,9 +22,11 @@ from tg_news_bot.db.models import (
     ScheduledPostStatus,
 )
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
+from tg_news_bot.repositories.articles import ArticleRepository
 from tg_news_bot.repositories.drafts import DraftRepository
 from tg_news_bot.repositories.publish_failures import PublishFailureRepository
 from tg_news_bot.repositories.scheduled_posts import ScheduledPostRepository
+from tg_news_bot.repositories.sources import SourceRepository
 from tg_news_bot.services.keyboards import (
     build_schedule_keyboard,
     build_source_button_keyboard,
@@ -34,6 +36,7 @@ from tg_news_bot.services.edit_sessions import EditSessionService
 from tg_news_bot.services.rendering import render_card_text, render_post_content
 from tg_news_bot.services.metrics import metrics
 from tg_news_bot.services.scheduling import ScheduleService
+from tg_news_bot.services.text_generation import TextPipeline, compose_post_text
 from tg_news_bot.services.workflow_types import DraftAction, TransitionRequest
 
 
@@ -50,6 +53,9 @@ class DraftWorkflowService:
         edit_session_service: EditSessionService | None = None,
         post_formatting: PostFormattingSettings | None = None,
         publish_failure_repo: PublishFailureRepository | None = None,
+        source_repo: SourceRepository | None = None,
+        article_repo: ArticleRepository | None = None,
+        text_pipeline: TextPipeline | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._publisher = publisher
@@ -60,6 +66,9 @@ class DraftWorkflowService:
         self._edit_sessions = edit_session_service or EditSessionService(publisher)
         self._post_formatting = post_formatting
         self._publish_failure_repo = publish_failure_repo or PublishFailureRepository()
+        self._source_repo = source_repo or SourceRepository()
+        self._article_repo = article_repo or ArticleRepository()
+        self._text_pipeline = text_pipeline
 
     async def transition(self, request: TransitionRequest) -> Draft:
         async with self._session_factory() as session:
@@ -203,6 +212,46 @@ class DraftWorkflowService:
             )
         except (PublisherNotFound, PublisherEditNotAllowed, PublisherNotModified):
             return
+
+    async def process_editing_text(self, *, draft_id: int) -> None:
+        if self._text_pipeline is None:
+            raise RuntimeError("text pipeline is not configured")
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                draft = await self._draft_repo.get_for_update(session, draft_id)
+                if draft.state != DraftState.EDITING:
+                    raise ValueError("processing is available only for EDITING drafts")
+
+                source_tags: dict | None = None
+                if draft.source_id is not None:
+                    source = await self._source_repo.get_by_id(session, draft.source_id)
+                    if source:
+                        source_tags = source.tags
+                topic_hints = self._topic_hints_from_tags(source_tags)
+
+                source_text = draft.extracted_text
+                if not source_text and draft.article_id is not None:
+                    article = await self._article_repo.get_by_id(session, draft.article_id)
+                    if article and article.extracted_text:
+                        source_text = article.extracted_text
+                if not source_text:
+                    source_text = draft.title_en
+                if not source_text:
+                    raise ValueError("draft has no source text to process")
+
+                generated = await self._text_pipeline.generate_parts(
+                    title_en=draft.title_en,
+                    text_en=source_text,
+                    topic_hints=topic_hints,
+                )
+                draft.post_text_ru = compose_post_text(
+                    generated.title_ru,
+                    generated.summary_ru,
+                )
+                await session.flush()
+
+        await self._refresh_draft_messages(draft_id=draft_id)
 
     def _resolve_target_state(
         self, current: DraftState, action: DraftAction
@@ -397,3 +446,59 @@ class DraftWorkflowService:
     @staticmethod
     def _has_published_channel_message(draft: Draft) -> bool:
         return bool(draft.published_message_id)
+
+    async def _refresh_draft_messages(self, *, draft_id: int) -> None:
+        async with self._session_factory() as session:
+            draft = await self._draft_repo.get(session, draft_id)
+            if not draft:
+                return
+            if not draft.group_chat_id or not draft.post_message_id:
+                return
+
+        keyboard = build_state_keyboard(draft, draft.state)
+        post_content = render_post_content(draft, formatting=self._post_formatting)
+        try:
+            await self._publisher.edit_post(
+                chat_id=draft.group_chat_id,
+                message_id=draft.post_message_id,
+                content=post_content,
+                keyboard=keyboard,
+            )
+        except PublisherNotModified:
+            pass
+        except (PublisherNotFound, PublisherEditNotAllowed):
+            return
+
+        if not draft.card_message_id:
+            return
+        try:
+            await self._publisher.edit_text(
+                chat_id=draft.group_chat_id,
+                message_id=draft.card_message_id,
+                text=render_card_text(draft),
+                keyboard=None,
+                parse_mode=None,
+                disable_web_page_preview=True,
+            )
+        except (PublisherNotFound, PublisherEditNotAllowed, PublisherNotModified):
+            return
+
+    @staticmethod
+    def _topic_hints_from_tags(source_tags: dict | None) -> list[str]:
+        if not source_tags:
+            return []
+        topics_value = source_tags.get("topics")
+        if isinstance(topics_value, list):
+            return [
+                str(item).strip().lower()
+                for item in topics_value
+                if str(item).strip()
+            ]
+        if isinstance(topics_value, str):
+            text = topics_value.strip().lower()
+            return [text] if text else []
+        topic_value = source_tags.get("topic")
+        if isinstance(topic_value, str):
+            text = topic_value.strip().lower()
+            return [text] if text else []
+        return []

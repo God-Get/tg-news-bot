@@ -80,6 +80,7 @@ class LLMSettings(BaseModel):
 class TextGenerationSettings(BaseModel):
     summary_max_chars: int = Field(900, ge=200, le=3000)
     keep_lang_prefix: bool = False
+    defer_to_editing: bool = False
 
 
 class PostFormattingSettings(BaseModel):

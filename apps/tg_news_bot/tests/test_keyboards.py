@@ -7,6 +7,7 @@ from tg_news_bot.db.models import Draft, DraftState
 from tg_news_bot.services.keyboards import (
     build_schedule_keyboard,
     build_source_button_keyboard,
+    build_state_keyboard,
 )
 
 
@@ -105,3 +106,13 @@ def test_build_schedule_times_menu_shows_no_slots_hint_for_late_today() -> None:
 
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
     assert "На сегодня слотов нет" in labels
+
+
+def test_build_state_keyboard_editing_has_process_button() -> None:
+    draft = _draft()
+    draft.state = DraftState.EDITING
+    keyboard = build_state_keyboard(draft, DraftState.EDITING)
+
+    first_button = keyboard.inline_keyboard[0][0]
+    assert first_button.text == "Сделать выжимку"
+    assert first_button.callback_data == "draft:1:process_now"

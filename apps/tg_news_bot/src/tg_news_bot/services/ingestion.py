@@ -352,68 +352,73 @@ class IngestionRunner:
         image_selector = ImageSelector(self._settings.images, http)
         image = await image_selector.select(html, link)
 
-        cached_title_ru: str | None = None
-        cached_summary_ru: str | None = None
-        async with self._session_factory() as session:
-            async with session.begin():
-                cached = await self._llm_cache_repo.get_by_normalized_url(
-                    session,
-                    normalized,
-                )
-                if cached:
-                    cached_title_ru = cached.title_ru
-                    cached_summary_ru = cached.summary_ru
-
         generated_title_ru: str | None = None
         generated_summary_ru: str | None = None
-        if cached_summary_ru is not None:
-            post_text_ru = compose_post_text(cached_title_ru, cached_summary_ru)
-            metrics.inc_counter("llm_requests_total", labels={"result": "cache_hit"})
+        if self._settings.text_generation.defer_to_editing:
+            # In defer mode INBOX keeps source text; summarization/translation is triggered in EDITING.
+            post_text_ru = compose_post_text(title_en, text_en or "")
+            metrics.inc_counter("llm_requests_total", labels={"result": "deferred"})
         else:
-            try:
-                generated = await self._text_pipeline.generate_parts(
-                    title_en=title_en,
-                    text_en=text_en,
-                    topic_hints=topic_hints,
-                )
-                generated_title_ru = generated.title_ru
-                generated_summary_ru = generated.summary_ru
-                post_text_ru = compose_post_text(generated_title_ru, generated_summary_ru)
-                metrics.inc_counter("llm_requests_total", labels={"result": "success"})
-            except LLMCircuitOpenError:
-                self._log.warning(
-                    "ingestion.text_generation_circuit_open",
-                    normalized_url=normalized,
-                )
-                add_sentry_breadcrumb(
-                    category="ingestion",
-                    message="llm circuit open",
-                    level="warning",
-                    data={"normalized_url": normalized},
-                )
-                metrics.inc_counter("llm_requests_total", labels={"result": "circuit_open"})
-                post_text_ru = await self._fallback_text_pipeline.generate_post(
-                    title_en=title_en,
-                    text_en=text_en,
-                    topic_hints=topic_hints,
-                )
-            except Exception:
-                self._log.exception(
-                    "ingestion.text_generation_failed",
-                    normalized_url=normalized,
-                )
-                add_sentry_breadcrumb(
-                    category="ingestion",
-                    message="text generation failed",
-                    level="error",
-                    data={"normalized_url": normalized},
-                )
-                metrics.inc_counter("llm_requests_total", labels={"result": "failed"})
-                post_text_ru = await self._fallback_text_pipeline.generate_post(
-                    title_en=title_en,
-                    text_en=text_en,
-                    topic_hints=topic_hints,
-                )
+            cached_title_ru: str | None = None
+            cached_summary_ru: str | None = None
+            async with self._session_factory() as session:
+                async with session.begin():
+                    cached = await self._llm_cache_repo.get_by_normalized_url(
+                        session,
+                        normalized,
+                    )
+                    if cached:
+                        cached_title_ru = cached.title_ru
+                        cached_summary_ru = cached.summary_ru
+
+            if cached_summary_ru is not None:
+                post_text_ru = compose_post_text(cached_title_ru, cached_summary_ru)
+                metrics.inc_counter("llm_requests_total", labels={"result": "cache_hit"})
+            else:
+                try:
+                    generated = await self._text_pipeline.generate_parts(
+                        title_en=title_en,
+                        text_en=text_en,
+                        topic_hints=topic_hints,
+                    )
+                    generated_title_ru = generated.title_ru
+                    generated_summary_ru = generated.summary_ru
+                    post_text_ru = compose_post_text(generated_title_ru, generated_summary_ru)
+                    metrics.inc_counter("llm_requests_total", labels={"result": "success"})
+                except LLMCircuitOpenError:
+                    self._log.warning(
+                        "ingestion.text_generation_circuit_open",
+                        normalized_url=normalized,
+                    )
+                    add_sentry_breadcrumb(
+                        category="ingestion",
+                        message="llm circuit open",
+                        level="warning",
+                        data={"normalized_url": normalized},
+                    )
+                    metrics.inc_counter("llm_requests_total", labels={"result": "circuit_open"})
+                    post_text_ru = await self._fallback_text_pipeline.generate_post(
+                        title_en=title_en,
+                        text_en=text_en,
+                        topic_hints=topic_hints,
+                    )
+                except Exception:
+                    self._log.exception(
+                        "ingestion.text_generation_failed",
+                        normalized_url=normalized,
+                    )
+                    add_sentry_breadcrumb(
+                        category="ingestion",
+                        message="text generation failed",
+                        level="error",
+                        data={"normalized_url": normalized},
+                    )
+                    metrics.inc_counter("llm_requests_total", labels={"result": "failed"})
+                    post_text_ru = await self._fallback_text_pipeline.generate_post(
+                        title_en=title_en,
+                        text_en=text_en,
+                        topic_hints=topic_hints,
+                    )
 
         article = Article(
             source_id=source_id,

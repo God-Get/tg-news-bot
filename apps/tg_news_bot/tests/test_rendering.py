@@ -99,7 +99,26 @@ def test_render_post_content_limits_caption_length_for_photo() -> None:
 
     assert content.photo == "https://example.com/image.jpg"
     assert len(content.text) <= CAPTION_MAX_LEN
-    assert content.text.endswith("…")
+    assert "…" in content.text
+
+
+def test_render_post_content_truncation_keeps_valid_html_tags() -> None:
+    draft = _make_draft(
+        state=DraftState.INBOX,
+        source_image_url="https://example.com/image.jpg",
+        post_text_ru="Очень длинный заголовок\n\n" + ("текст " * 2000),
+        score_reasons={"kw:ai": 1.0},
+    )
+    formatting = PostFormattingSettings(source_mode="text")
+
+    content = render_post_content(draft, formatting=formatting)
+
+    assert content.photo == "https://example.com/image.jpg"
+    assert content.parse_mode == "HTML"
+    assert len(content.text) <= CAPTION_MAX_LEN
+    assert content.text.count("<b>") == content.text.count("</b>")
+    assert content.text.count("<a href=") == content.text.count("</a>")
+    assert '<a href="https://example.com/item">Источник</a>' in content.text
 
 
 def test_render_post_content_respects_configured_order_and_hashtag_limit() -> None:

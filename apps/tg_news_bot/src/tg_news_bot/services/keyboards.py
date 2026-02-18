@@ -38,6 +38,12 @@ def build_state_keyboard(draft: Draft, state: DraftState):
         rows = [
             [
                 ButtonSpec(
+                    text="Сделать выжимку",
+                    callback_data=build_callback(draft.id, "process_now"),
+                )
+            ],
+            [
+                ButtonSpec(
                     text="В публикацию",
                     callback_data=build_callback(draft.id, DraftAction.TO_READY),
                 )
