@@ -273,13 +273,21 @@ class DraftWorkflowService:
             schedule_at=schedule_at,
             state=target_state,
         )
-        card = await self._publisher.send_text(
-            chat_id=group_chat_id,
-            topic_id=topic_id,
-            text=card_text,
-            keyboard=None,
-            parse_mode=None,
-        )
+        try:
+            card = await self._publisher.send_text(
+                chat_id=group_chat_id,
+                topic_id=topic_id,
+                text=card_text,
+                keyboard=None,
+                parse_mode=None,
+            )
+        except Exception:
+            # Keep POST/CARD pair consistent: if CARD send fails, remove freshly sent POST.
+            try:
+                await self._safe_delete(group_chat_id, post.message_id)
+            except Exception:
+                pass
+            raise
 
         old_post_id = draft.post_message_id
         old_card_id = draft.card_message_id
