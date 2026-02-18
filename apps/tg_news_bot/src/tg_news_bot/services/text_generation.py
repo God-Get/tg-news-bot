@@ -240,12 +240,22 @@ class LLMTranslator:
             return ""
 
         system_prompt = (
-            "Translate the text accurately. Keep links, numbers and proper names unchanged when possible. "
+            "Translate the text accurately. "
+            "Preserve facts: links, numbers, dates, abbreviations and proper names. "
+            "Do not invent or omit factual details. "
             "Return plain text only."
         )
+        anchors = _extract_fact_anchors(compact)
+        anchors_block = ""
+        if anchors:
+            anchors_lines = "\n".join(f"- {item}" for item in anchors)
+            anchors_block = (
+                "Keep these anchors unchanged when they appear in the source text:\n"
+                f"{anchors_lines}\n\n"
+            )
         result = await self.client.complete(
             system_prompt=system_prompt,
-            user_prompt=f"Target language: {target_lang}\n\n{compact}",
+            user_prompt=f"Target language: {target_lang}\n\n{anchors_block}{compact}",
         )
         translated = _compact_text(result) or compact
         if self.keep_lang_prefix:
@@ -397,3 +407,56 @@ def _trim_to_limit(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "..."
+
+
+def _extract_fact_anchors(text: str, *, max_items: int = 16) -> list[str]:
+    patterns = [
+        r"https?://\S+",
+        r"\b\d{4}-\d{2}-\d{2}\b",
+        r"\b\d+(?:[.,]\d+)?(?:%|[KMBT]|(?:\s?(?:km|kg|mw|gw|tb|gb)))?\b",
+        r"\b[A-Z]{2,}(?:-[A-Z0-9]+)?\b",
+        r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b",
+        r"\b[A-Za-z]+-\d+[A-Za-z0-9-]*\b",
+    ]
+    ignored_titlecase = {
+        "The",
+        "A",
+        "An",
+        "In",
+        "On",
+        "At",
+        "For",
+        "From",
+        "To",
+        "And",
+        "Or",
+        "But",
+        "With",
+        "Without",
+        "By",
+        "Of",
+    }
+
+    matches: list[tuple[int, str]] = []
+    for pattern in patterns:
+        for found in re.finditer(pattern, text):
+            value = found.group(0).strip(".,;:()[]{}\"'")
+            if not value:
+                continue
+            if value in ignored_titlecase:
+                continue
+            if len(value) == 1 and not value.isdigit():
+                continue
+            matches.append((found.start(), value))
+
+    matches.sort(key=lambda item: item[0])
+    anchors: list[str] = []
+    seen: set[str] = set()
+    for _, value in matches:
+        if value in seen:
+            continue
+        seen.add(value)
+        anchors.append(value)
+        if len(anchors) >= max_items:
+            break
+    return anchors

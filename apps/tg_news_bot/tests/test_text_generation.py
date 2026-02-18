@@ -22,9 +22,11 @@ from tg_news_bot.services.text_generation import (
 class _FakeClient:
     response: str
     system_prompts: list[str] = field(default_factory=list)
+    user_prompts: list[str] = field(default_factory=list)
 
-    async def complete(self, *, system_prompt: str, user_prompt: str) -> str:  # noqa: ARG002
+    async def complete(self, *, system_prompt: str, user_prompt: str) -> str:
         self.system_prompts.append(system_prompt)
+        self.user_prompts.append(user_prompt)
         return self.response
 
 
@@ -40,6 +42,24 @@ class _SequenceClient(OpenAICompatClient):
         if isinstance(item, Exception):
             raise item
         return str(item)
+
+
+@dataclass
+class _OrderSummarizer:
+    calls: list[tuple[str, str]] = field(default_factory=list)
+
+    async def summarize(self, text: str, *, topic_hints=None) -> str:  # noqa: ANN001
+        self.calls.append(("summarize", text))
+        return "summary-en"
+
+
+@dataclass
+class _OrderTranslator:
+    calls: list[tuple[str, str]] = field(default_factory=list)
+
+    async def translate(self, text: str, *, target_lang: str) -> str:
+        self.calls.append((target_lang, text))
+        return f"ru:{text}"
 
 
 @pytest.mark.asyncio
@@ -61,6 +81,22 @@ async def test_generate_post_without_title() -> None:
     result = await pipeline.generate_post(title_en=None, text_en="Hello")
 
     assert result == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_summary_before_translation() -> None:
+    summarizer = _OrderSummarizer()
+    translator = _OrderTranslator()
+    pipeline = TextPipeline(summarizer, translator)
+
+    result = await pipeline.generate_post(
+        title_en="Breaking Title",
+        text_en="Main body text",
+    )
+
+    assert summarizer.calls == [("summarize", "Main body text")]
+    assert translator.calls == [("RU", "summary-en"), ("RU", "Breaking Title")]
+    assert result == "ru:Breaking Title\n\nru:summary-en"
 
 
 @pytest.mark.asyncio
@@ -110,6 +146,27 @@ async def test_llm_translator_prefix_option() -> None:
     result = await translator.translate("Hello world", target_lang="RU")
 
     assert result == "[RU] Привет мир"
+
+
+@pytest.mark.asyncio
+async def test_llm_translator_adds_fact_anchors_to_prompt() -> None:
+    fake = _FakeClient(response="Перевод")
+    translator = LLMTranslator(client=fake, keep_lang_prefix=False)
+
+    source = (
+        "NASA launched Artemis II on 2026-05-21 with GPT-5 budget 2.5B. "
+        "Details: https://example.com/mission"
+    )
+    await translator.translate(source, target_lang="RU")
+
+    assert len(fake.user_prompts) == 1
+    prompt = fake.user_prompts[0]
+    assert "Target language: RU" in prompt
+    assert "NASA" in prompt
+    assert "Artemis II" in prompt
+    assert "2026-05-21" in prompt
+    assert "GPT-5" in prompt
+    assert "https://example.com/mission" in prompt
 
 
 @pytest.mark.asyncio
