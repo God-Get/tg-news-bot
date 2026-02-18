@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tg_news_bot.config import Settings
 from tg_news_bot.db.models import BotSettings
 from tg_news_bot.logging import get_logger
+from tg_news_bot.ports.publisher import PublisherPort
 from tg_news_bot.repositories.sources import SourceRepository
 from tg_news_bot.services.ingestion import IngestionRunner, IngestionStats
-from telegram_publisher import TelegramPublisher
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 
 log = get_logger(__name__)
@@ -29,7 +29,7 @@ class SettingsContext:
     session_factory: async_sessionmaker[AsyncSession]
     repository: BotSettingsRepository
     source_repository: SourceRepository
-    publisher: TelegramPublisher
+    publisher: PublisherPort
     ingestion_runner: IngestionRunner | None = None
 
 

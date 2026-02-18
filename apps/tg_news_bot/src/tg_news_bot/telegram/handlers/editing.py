@@ -10,7 +10,7 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_news_bot.config import Settings
-from telegram_publisher import TelegramPublisher
+from tg_news_bot.ports.publisher import PublisherPort
 from telegram_publisher.exceptions import PublisherNotFound
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 from tg_news_bot.services.edit_sessions import EditPayload, EditSessionService
@@ -21,7 +21,7 @@ class EditContext:
     settings: Settings
     session_factory: async_sessionmaker[AsyncSession]
     edit_sessions: EditSessionService
-    publisher: TelegramPublisher
+    publisher: PublisherPort
 
 
 def create_edit_router(context: EditContext) -> Router:

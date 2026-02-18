@@ -8,8 +8,8 @@ from aiogram import Router
 from aiogram.types import Message
 
 from tg_news_bot.config import Settings
+from tg_news_bot.ports.publisher import PublisherPort
 from tg_news_bot.services.schedule_input import ScheduleInputService
-from telegram_publisher import TelegramPublisher
 from telegram_publisher.exceptions import PublisherNotFound
 
 
@@ -17,7 +17,7 @@ from telegram_publisher.exceptions import PublisherNotFound
 class ScheduleInputContext:
     settings: Settings
     schedule_input: ScheduleInputService
-    publisher: TelegramPublisher
+    publisher: PublisherPort
 
 
 def create_schedule_input_router(context: ScheduleInputContext) -> Router:

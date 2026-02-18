@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from aiogram import Bot, Dispatcher
 
 from telegram_publisher import TelegramPublisher
+from tg_news_bot.adapters import PublisherAdapter
 from tg_news_bot.config import Settings
 from tg_news_bot.db.session import create_session_factory
 from tg_news_bot.logging import configure_logging, get_logger
@@ -45,7 +46,7 @@ async def _run() -> int:
     session_factory = create_session_factory(settings.database_url)
 
     bot = Bot(token=settings.bot_token)
-    publisher = TelegramPublisher(bot)
+    publisher = PublisherAdapter(TelegramPublisher(bot))
     dispatcher = Dispatcher()
 
     ingestion = IngestionRunner(

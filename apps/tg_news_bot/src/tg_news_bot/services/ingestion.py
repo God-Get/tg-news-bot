@@ -13,12 +13,12 @@ from httpx import AsyncClient
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from telegram_publisher import TelegramPublisher
 from telegram_publisher.types import PostContent
 from tg_news_bot.config import Settings
 from tg_news_bot.db.models import Article, Draft, DraftState, ImageStatus
 from tg_news_bot.logging import get_logger
 from tg_news_bot.monitoring import add_sentry_breadcrumb, capture_sentry_exception
+from tg_news_bot.ports.publisher import PublisherPort
 from tg_news_bot.repositories.articles import ArticleRepository
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 from tg_news_bot.repositories.drafts import DraftRepository
@@ -85,7 +85,7 @@ class IngestionRunner:
         *,
         settings: Settings,
         session_factory: async_sessionmaker[AsyncSession],
-        publisher: TelegramPublisher,
+        publisher: PublisherPort,
         config: IngestionConfig,
     ) -> None:
         self._settings = settings
