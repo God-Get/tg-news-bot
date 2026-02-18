@@ -65,7 +65,8 @@
 - Динамическая справка `/commands` (подтягивает команды из роутера, включая `/cancel`).
 - БД и миграции (минимум + operational сущности):
   - `sources`, `articles`, `drafts`, `bot_settings`,
-  - `edit_sessions`, `scheduled_posts`, `schedule_input_sessions`, `publish_failures`, `llm_cache`.
+  - `edit_sessions`, `scheduled_posts`, `schedule_input_sessions`, `publish_failures`, `llm_cache`,
+  - `trend_signals`, `semantic_fingerprints`.
 
 ## Актуальные команды (admin)
 Настройка:
@@ -83,6 +84,7 @@
 Источники:
 - `/add_source <rss_url> [name]`
 - `/list_sources`
+- `/source_quality [source_id]`
 - `/set_source_topics <source_id> <topics>`
 - `/clear_source_topics <source_id>`
 - `/set_source_ssl_insecure <source_id> <on|off>`
@@ -96,22 +98,41 @@ Ingestion и обработка:
 - `/ingest_url <article_url> [source_id]`
 - `/process_range <from_id> <to_id>`
 
+Operations/аналитика:
+- `/scheduled_failed_list [limit]`
+- `/scheduled_retry <draft_id>`
+- `/scheduled_cancel <draft_id>`
+- `/collect_trends`
+- `/trends [hours] [limit]`
+- `/analytics [hours]`
+
 Редактирование:
 - `/cancel`
 
-## Что еще не реализовано (бэклог)
-- Operational-команды для `SCHEDULED/FAILED`:
-  - список проблемных scheduled-публикаций,
-  - ручной retry/cancel конкретных задач.
-- Полноценный runbook эксплуатации:
-  - восстановление после сбоев,
-  - чек-лист ручной верификации релиза,
-  - backup/restore для Postgres.
-- Расширенный анти-логотип/анти-мусор фильтр изображений (сейчас базовый по URL/размерам).
-- Тренд-аналитика и рекомендации источников для улучшения скоринга (отложено отдельно).
-- Семантический дедупликационный слой (near-duplicates по embedding).
-- Метрики/дашборды воронки и качества публикаций.
-- Авто-теги/рубрикатор и pre-publish content safety checks.
+## Что реализовано в этом спринте дополнительно
+- Trend-модуль:
+  - сбор сигналов из `arXiv`, `Hacker News`, `Reddit`, опциональных `X` feed источников,
+  - хранение трендов в БД,
+  - динамическое влияние на scoring через trend keywords.
+- Операционный центр scheduled-публикаций:
+  - список failed задач,
+  - ручной retry/cancel.
+- Оценка качества источников:
+  - `trust_score` для `sources`,
+  - авто-понижение/авто-выключение шумных источников по quality событиям.
+- Семантический dedup:
+  - near-duplicate проверка по lightweight embedding и cosine similarity.
+- Панель аналитики:
+  - ingestion rate,
+  - conversion по воронке,
+  - median time-to-publish,
+  - ошибки publish/scheduler.
+- Авто-теги/рубрикатор:
+  - тематическая классификация,
+  - smart hashtags в рендеринге поста.
+- Контент-безопасность:
+  - блок токсичных/рекламных/низкокачественных материалов до `READY`,
+  - фильтрация unsafe материалов на этапе ingestion.
 
 ## Приоритеты roadmap
 - Актуальный список задач: `docs/ROADMAP.md`.

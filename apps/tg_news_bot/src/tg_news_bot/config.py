@@ -33,6 +33,86 @@ class ScoringSettings(BaseModel):
     title_keyword_multiplier: float = Field(1.3, ge=1.0, le=3.0)
 
 
+class TrendsSettings(BaseModel):
+    enabled: bool = True
+    collect_interval_seconds: int = Field(1800, ge=60, le=86400)
+    lookback_hours: int = Field(48, ge=1, le=720)
+    max_keywords: int = Field(200, ge=10, le=2000)
+    min_keyword_length: int = Field(3, ge=2, le=32)
+    max_keyword_length: int = Field(40, ge=6, le=128)
+    max_boost_per_keyword: float = Field(1.5, ge=0.1, le=5.0)
+    arxiv_feeds: list[str] = Field(
+        default_factory=lambda: [
+            "https://export.arxiv.org/rss/cs.AI",
+            "https://export.arxiv.org/rss/astro-ph",
+            "https://export.arxiv.org/rss/physics.app-ph",
+        ]
+    )
+    reddit_feeds: list[str] = Field(
+        default_factory=lambda: [
+            "https://www.reddit.com/r/science/top/.json?t=day&limit=50",
+            "https://www.reddit.com/r/technology/top/.json?t=day&limit=50",
+            "https://www.reddit.com/r/MachineLearning/top/.json?t=day&limit=50",
+        ]
+    )
+    x_feeds: list[str] = Field(default_factory=list)
+    hn_top_n: int = Field(80, ge=10, le=500)
+
+
+class SourceQualitySettings(BaseModel):
+    enabled: bool = True
+    auto_disable_enabled: bool = True
+    auto_disable_threshold: float = Field(-4.0, ge=-20.0, le=0.0)
+    min_events_for_auto_disable: int = Field(12, ge=1, le=200)
+    created_delta: float = Field(0.25, ge=0.0, le=5.0)
+    duplicate_delta: float = Field(-0.2, ge=-5.0, le=0.0)
+    blocked_delta: float = Field(-0.8, ge=-5.0, le=0.0)
+    low_score_delta: float = Field(-0.35, ge=-5.0, le=0.0)
+    no_html_delta: float = Field(-0.3, ge=-5.0, le=0.0)
+    invalid_entry_delta: float = Field(-0.15, ge=-5.0, le=0.0)
+    unsafe_delta: float = Field(-1.0, ge=-5.0, le=0.0)
+    near_duplicate_delta: float = Field(-0.5, ge=-5.0, le=0.0)
+
+
+class SemanticDedupSettings(BaseModel):
+    enabled: bool = True
+    dimensions: int = Field(128, ge=32, le=1024)
+    similarity_threshold: float = Field(0.92, ge=0.5, le=0.999)
+    lookback_hours: int = Field(120, ge=1, le=720)
+    max_candidates: int = Field(600, ge=10, le=5000)
+    store_vectors: bool = True
+
+
+class ContentSafetySettings(BaseModel):
+    enabled: bool = True
+    min_ready_chars: int = Field(140, ge=20, le=5000)
+    max_links_in_text: int = Field(6, ge=0, le=50)
+    ad_keywords: list[str] = Field(
+        default_factory=lambda: [
+            "sponsored",
+            "promo code",
+            "subscribe now",
+            "limited offer",
+            "buy now",
+            "casino",
+            "betting",
+        ]
+    )
+    toxic_keywords: list[str] = Field(
+        default_factory=lambda: [
+            "kill",
+            "hate speech",
+            "racist",
+            "extremist propaganda",
+        ]
+    )
+
+
+class AnalyticsSettings(BaseModel):
+    default_window_hours: int = Field(24, ge=1, le=720)
+    max_window_hours: int = Field(720, ge=24, le=8760)
+
+
 class ImageFilterSettings(BaseModel):
     min_width: int = Field(600, ge=100)
     min_height: int = Field(400, ge=100)
@@ -161,6 +241,11 @@ class Settings(BaseSettings):
 
     rss: RSSSettings = RSSSettings()
     scoring: ScoringSettings = ScoringSettings()
+    trends: TrendsSettings = TrendsSettings()
+    source_quality: SourceQualitySettings = SourceQualitySettings()
+    semantic_dedup: SemanticDedupSettings = SemanticDedupSettings()
+    content_safety: ContentSafetySettings = ContentSafetySettings()
+    analytics: AnalyticsSettings = AnalyticsSettings()
     images: ImageFilterSettings = ImageFilterSettings()
     scheduler: SchedulerSettings = SchedulerSettings()
     llm: LLMSettings = LLMSettings()

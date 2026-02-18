@@ -81,3 +81,29 @@ def test_scoring_short_text_uses_soft_penalty() -> None:
     )
 
     assert result.reasons["length_penalty"] == pytest.approx(-0.2)
+
+
+def test_scoring_applies_trend_and_trust_boosts() -> None:
+    settings = ScoringSettings(
+        min_length_chars=200,
+        max_length_chars=5000,
+        freshness_hours=24,
+        min_score=0.0,
+    )
+    service = ScoringService(settings)
+
+    result = service.score(
+        text=(
+            "NVIDIA and OpenAI announce new AI inference stack. "
+            + ("Detailed benchmark data and deployment notes. " * 10)
+        ),
+        title="AI news",
+        domain="example.com",
+        published_at=None,
+        trend_boosts={"nvidia": 0.4, "openai": 0.5},
+        source_trust_score=2.0,
+    )
+
+    assert result.reasons["trend:nvidia"] == pytest.approx(0.4)
+    assert result.reasons["trend:openai"] == pytest.approx(0.5)
+    assert result.reasons["source_trust"] == pytest.approx(0.3)

@@ -66,8 +66,17 @@ async def test_ingest_url_returns_created_result() -> None:
     )
     runner._session_factory = _SessionFactory()
     runner._draft_repo = _DraftRepo(draft_id=55)
+    runner._trend_collector = None
 
-    async def _process_entry(source_id, entry, topic_hints, http, stats):  # noqa: ANN001, ARG001
+    async def _process_entry(  # noqa: ANN001, ARG001
+        source_id,
+        entry,
+        topic_hints,
+        source_trust_score,
+        trend_boosts,
+        http,
+        stats,
+    ):
         return True
 
     runner._process_entry = _process_entry
@@ -85,8 +94,17 @@ async def test_ingest_url_maps_duplicate_reason() -> None:
     runner._normalized_url_candidates = (
         lambda url, entry_id=None: ["https://example.com/news/1"]  # noqa: ARG005
     )
+    runner._trend_collector = None
 
-    async def _process_entry(source_id, entry, topic_hints, http, stats):  # noqa: ANN001, ARG001
+    async def _process_entry(  # noqa: ANN001, ARG001
+        source_id,
+        entry,
+        topic_hints,
+        source_trust_score,
+        trend_boosts,
+        http,
+        stats,
+    ):
         stats.duplicates = 1
         return False
 

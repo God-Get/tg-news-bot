@@ -104,6 +104,8 @@ async def test_commands_help_contains_syntax_lines() -> None:
     assert "/commands" in text
     assert "/ingest_url <article_url> [source_id]" in text
     assert "/process_range <from_id> <to_id>" in text
+    assert "/scheduled_failed_list [limit]" in text
+    assert "/analytics [hours]" in text
     assert "/cancel" in text
 
 

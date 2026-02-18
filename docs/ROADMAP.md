@@ -1,28 +1,15 @@
 # Roadmap (2026-02-18)
 
-Текущий план расширения проекта (утвержден): реализуем все пункты из backlog, кроме multi-admin ролей.
+## Реализовано
+1. Тренд-модуль и влияние трендов на scoring.
+2. Операционный центр scheduled-публикаций (`failed list/retry/cancel`).
+3. Source quality: trust score + авто-понижение шумных источников.
+4. Семантический dedup (near-duplicates по embedding).
+5. Панель аналитики (ingestion rate, conversion, time-to-publish, errors).
+6. Авто-теги/рубрикатор для smart hashtags.
+7. Контент-безопасность до READY и на ingestion.
 
-## Активные направления
-1. Тренд-модуль: сигналы из внешних источников и влияние на скоринг.
-2. Операционный центр scheduled-публикаций:
-   - список failed/pending задач,
-   - ручной retry/cancel.
-3. Оценка качества источников:
-   - trust score доменов/источников,
-   - автопонижение "шумных" источников.
-4. Семантический дедуп:
-   - поиск near-duplicate по embedding,
-   - объединение с текущим URL/title dedup.
-5. Метрики и аналитика:
-   - ingestion throughput,
-   - conversion по воронке Draft-state,
-   - publish failure dashboard.
-6. Авто-теги и рубрикатор:
-   - тематическая классификация,
-   - улучшенные хэштеги.
-7. Контент-безопасность:
-   - фильтрация рекламных/низкокачественных материалов,
-   - дополнительные проверки перед READY.
-
-## Отложено
-- Multi-admin роли и ACL (owner/editor/reviewer) отложены до стабилизации основной функциональности.
+## Следующий этап
+1. Hardening runbook: backup/restore, disaster-recovery, релизный smoke checklist.
+2. Улучшенный image-quality filter (анти-логотип/анти-баннер).
+3. Multi-admin роли и ACL (отложено по договоренности).

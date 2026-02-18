@@ -13,12 +13,17 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_news_bot.config import Settings
-from tg_news_bot.db.models import BotSettings
+from tg_news_bot.db.models import BotSettings, DraftState, ScheduledPostStatus
 from tg_news_bot.logging import get_logger
 from tg_news_bot.ports.publisher import PublisherPort
+from tg_news_bot.repositories.drafts import DraftRepository
+from tg_news_bot.repositories.scheduled_posts import ScheduledPostRepository
 from tg_news_bot.repositories.sources import SourceRepository
+from tg_news_bot.services.analytics import AnalyticsService
 from tg_news_bot.services.ingestion import IngestionRunner, IngestionStats
+from tg_news_bot.services.trends import TrendCollector
 from tg_news_bot.services.workflow import DraftWorkflowService
+from tg_news_bot.services.workflow_types import DraftAction, TransitionRequest
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 
 log = get_logger(__name__)
@@ -33,6 +38,10 @@ class SettingsContext:
     publisher: PublisherPort
     ingestion_runner: IngestionRunner | None = None
     workflow: DraftWorkflowService | None = None
+    trend_collector: TrendCollector | None = None
+    scheduled_repo: ScheduledPostRepository | None = None
+    draft_repo: DraftRepository | None = None
+    analytics: AnalyticsService | None = None
 
 
 def create_settings_router(context: SettingsContext) -> Router:
@@ -101,6 +110,10 @@ def create_settings_router(context: SettingsContext) -> Router:
             "syntax": "/remove_source <source_id>",
             "description": "удалить источник (или выключить при linked data)",
         },
+        "source_quality": {
+            "syntax": "/source_quality [source_id]",
+            "description": "показать trust score источников",
+        },
         "ingest_now": {
             "syntax": "/ingest_now",
             "description": "принудительный запуск RSS ingestion",
@@ -116,6 +129,30 @@ def create_settings_router(context: SettingsContext) -> Router:
         "process_range": {
             "syntax": "/process_range <from_id> <to_id>",
             "description": "пакетная выжимка/перевод для диапазона Draft ID",
+        },
+        "scheduled_failed_list": {
+            "syntax": "/scheduled_failed_list [limit]",
+            "description": "список failed scheduled задач",
+        },
+        "scheduled_retry": {
+            "syntax": "/scheduled_retry <draft_id>",
+            "description": "повторить failed scheduled задачу",
+        },
+        "scheduled_cancel": {
+            "syntax": "/scheduled_cancel <draft_id>",
+            "description": "отменить scheduled задачу и вернуть в READY",
+        },
+        "collect_trends": {
+            "syntax": "/collect_trends",
+            "description": "собрать сигналы трендов (arXiv/HN/X/Reddit)",
+        },
+        "trends": {
+            "syntax": "/trends [hours] [limit]",
+            "description": "показать последние trend signals",
+        },
+        "analytics": {
+            "syntax": "/analytics [hours]",
+            "description": "операционная панель метрик",
         },
         # editing router command
         "cancel": {
@@ -144,6 +181,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             "enable_source",
             "disable_source",
             "remove_source",
+            "source_quality",
         },
         "Ingestion/обработка": {
             "ingest_now",
@@ -151,9 +189,20 @@ def create_settings_router(context: SettingsContext) -> Router:
             "ingest_url",
             "process_range",
         },
+        "Operations": {
+            "scheduled_failed_list",
+            "scheduled_retry",
+            "scheduled_cancel",
+            "collect_trends",
+            "trends",
+            "analytics",
+        },
         "EDITING": {"cancel"},
     }
     preferred_order = list(command_meta.keys())
+    scheduled_repo = context.scheduled_repo or ScheduledPostRepository()
+    draft_repo = context.draft_repo or DraftRepository()
+    analytics_service = context.analytics or AnalyticsService(context.session_factory)
 
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and message.from_user.id == context.settings.admin_user_id)
@@ -208,6 +257,20 @@ def create_settings_router(context: SettingsContext) -> Router:
                 return None
             return parts[0], source_id
         return None
+
+    def parse_positive_int(raw: str | None) -> int | None:
+        if raw is None:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            value = int(text)
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+        return value
 
     def _discover_router_commands() -> list[str]:
         discovered: list[str] = []
@@ -280,6 +343,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             f"Пропущено (низкий score): {stats.skipped_low_score}",
             f"Пропущено (невалидные entry): {stats.skipped_invalid_entry}",
             f"Пропущено (нет HTML): {stats.skipped_no_html}",
+            f"Пропущено (unsafe): {stats.skipped_unsafe}",
             f"Пропущено (blocked): {stats.skipped_blocked}",
             f"Пропущено (rate limit): {stats.skipped_rate_limited}",
             f"Ошибки загрузки RSS: {stats.rss_fetch_errors}",
@@ -508,12 +572,15 @@ def create_settings_router(context: SettingsContext) -> Router:
             return
         sources_total = 0
         enabled_total = 0
+        avg_trust = 0.0
         async with context.session_factory() as session:
             async with session.begin():
                 bot_settings = await context.repository.get_or_create(session)
                 sources = await context.source_repository.list_all(session)
                 sources_total = len(sources)
                 enabled_total = sum(1 for item in sources if item.enabled)
+                if sources_total:
+                    avg_trust = sum(float(item.trust_score or 0.0) for item in sources) / sources_total
         lines = [
             "Текущие настройки:",
             f"group_chat_id: {bot_settings.group_chat_id}",
@@ -526,6 +593,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             f"channel_id: {bot_settings.channel_id}",
             f"sources_total: {sources_total}",
             f"sources_enabled: {enabled_total}",
+            f"sources_avg_trust: {avg_trust:.2f}",
         ]
         await context.publisher.send_text(
             chat_id=message.chat.id,
@@ -600,6 +668,7 @@ def create_settings_router(context: SettingsContext) -> Router:
                 f"name: {source.name}\n"
                 f"url: {source.url}\n"
                 f"enabled: {source.enabled}\n"
+                f"trust_score: {float(source.trust_score or 0.0):.2f}\n"
                 f"validation: {validation_message}"
             ),
         )
@@ -623,7 +692,9 @@ def create_settings_router(context: SettingsContext) -> Router:
         ]
         for item in sources:
             state = "ON" if item.enabled else "OFF"
-            lines.append(f"#{item.id} [{state}] {item.name}")
+            lines.append(
+                f"#{item.id} [{state}] trust={float(item.trust_score or 0.0):.2f} {item.name}"
+            )
             lines.append(item.url)
             topics = []
             if isinstance(item.tags, dict):
@@ -636,6 +707,9 @@ def create_settings_router(context: SettingsContext) -> Router:
                 ssl_flag = item.tags.get("allow_insecure_ssl")
                 if isinstance(ssl_flag, bool):
                     lines.append(f"allow_insecure_ssl: {str(ssl_flag).lower()}")
+                quality = item.tags.get("quality")
+                if isinstance(quality, dict):
+                    lines.append(f"quality_events: {quality.get('events_total', 0)}")
         await context.publisher.send_text(
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
@@ -1102,6 +1176,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             "blocked": "URL отклонён правилами blocked_domains/keywords.",
             "low_score": "Материал отклонён: score ниже порога.",
             "no_html": "Не удалось получить HTML страницы.",
+            "unsafe": "Материал отклонён фильтром контент-безопасности.",
             "invalid_entry": "Не удалось обработать ссылку как статью.",
             "invalid_url": "Некорректный URL.",
             "source_not_found": "Источник не найден. Проверьте source_id.",
@@ -1202,6 +1277,274 @@ def create_settings_router(context: SettingsContext) -> Router:
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             text="\n".join(lines),
+        )
+
+    @router.message(Command("source_quality"))
+    async def source_quality(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+
+        source_id = parse_positive_int(command.args if command and command.args else None)
+        async with context.session_factory() as session:
+            async with session.begin():
+                if source_id is not None:
+                    source = await context.source_repository.get_by_id(session, source_id)
+                    if not source:
+                        await context.publisher.send_text(
+                            chat_id=message.chat.id,
+                            topic_id=message.message_thread_id,
+                            text=f"Источник #{source_id} не найден.",
+                        )
+                        return
+                    tags = source.tags if isinstance(source.tags, dict) else {}
+                    quality = tags.get("quality") if isinstance(tags.get("quality"), dict) else {}
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text=(
+                            f"Источник #{source.id}: {source.name}\n"
+                            f"enabled: {source.enabled}\n"
+                            f"trust_score: {float(source.trust_score):.2f}\n"
+                            f"events_total: {quality.get('events_total', 0)}\n"
+                            f"last_event: {quality.get('last_event', '-')}"
+                        ),
+                    )
+                    return
+                sources = await context.source_repository.list_all(session)
+
+        if not sources:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Источники не найдены.",
+            )
+            return
+
+        ordered = sorted(sources, key=lambda item: float(item.trust_score or 0.0), reverse=True)
+        lines = [f"Source quality: {len(ordered)}"]
+        for source in ordered[:25]:
+            lines.append(
+                f"#{source.id} trust={float(source.trust_score):.2f} enabled={source.enabled} {source.name}"
+            )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("scheduled_failed_list"))
+    async def scheduled_failed_list(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        raw_limit = command.args if command else None
+        limit = parse_positive_int(raw_limit) or 10
+        limit = min(limit, 50)
+        async with context.session_factory() as session:
+            async with session.begin():
+                rows = await scheduled_repo.list_failed(session, limit=limit)
+                if not rows:
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text="FAILED scheduled задач нет.",
+                    )
+                    return
+                lines = [f"FAILED scheduled: {len(rows)}"]
+                for row in rows:
+                    draft = await draft_repo.get(session, row.draft_id)
+                    state = draft.state.value if draft else "N/A"
+                    next_retry = row.next_retry_at.isoformat() if row.next_retry_at else "-"
+                    lines.append(
+                        f"draft #{row.draft_id} state={state} attempts={row.attempts} "
+                        f"next_retry={next_retry} err={row.last_error or '-'}"
+                    )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("scheduled_retry"))
+    async def scheduled_retry(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        draft_id = parse_positive_int(command.args if command else None)
+        if draft_id is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /scheduled_retry <draft_id>",
+            )
+            return
+        async with context.session_factory() as session:
+            async with session.begin():
+                ok = await scheduled_repo.retry_now_by_draft(session, draft_id=draft_id)
+        if not ok:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Scheduled задача для Draft #{draft_id} не найдена.",
+            )
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"Повтор запланирован для Draft #{draft_id}.",
+        )
+
+    @router.message(Command("scheduled_cancel"))
+    async def scheduled_cancel(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        draft_id = parse_positive_int(command.args if command else None)
+        if draft_id is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /scheduled_cancel <draft_id>",
+            )
+            return
+
+        if context.workflow is not None:
+            async with context.session_factory() as session:
+                async with session.begin():
+                    draft = await draft_repo.get(session, draft_id)
+            if draft and draft.state == DraftState.SCHEDULED:
+                try:
+                    await context.workflow.transition(
+                        TransitionRequest(
+                            draft_id=draft_id,
+                            action=DraftAction.CANCEL_SCHEDULE,
+                            user_id=message.from_user.id if message.from_user else 0,
+                        )
+                    )
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text=f"Draft #{draft_id} переведён в READY, schedule отменён.",
+                    )
+                    return
+                except Exception:
+                    log.exception("settings.scheduled_cancel_workflow_failed", draft_id=draft_id)
+
+        async with context.session_factory() as session:
+            async with session.begin():
+                draft = await draft_repo.get(session, draft_id)
+                ok = await scheduled_repo.cancel_by_draft(session, draft_id=draft_id)
+                if draft and draft.state == DraftState.SCHEDULED:
+                    draft.state = DraftState.READY
+                    await session.flush()
+        if not ok:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Scheduled задача для Draft #{draft_id} не найдена.",
+            )
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"Scheduled задача Draft #{draft_id} отменена.",
+        )
+
+    @router.message(Command("collect_trends"))
+    async def collect_trends(message: Message) -> None:
+        if not is_admin(message):
+            return
+        if context.trend_collector is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Trend collector недоступен.",
+            )
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="Собираю тренды...",
+        )
+        try:
+            stats = await context.trend_collector.collect_once()
+        except Exception:
+            log.exception("settings.collect_trends_failed")
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Ошибка сбора трендов. Смотри логи.",
+            )
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=(
+                f"Тренды обновлены.\n"
+                f"signals inserted: {stats.inserted}\n"
+                f"keywords total: {stats.keywords_total}"
+            ),
+        )
+
+    @router.message(Command("trends"))
+    async def trends(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.trend_collector is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Trend collector недоступен.",
+            )
+            return
+        hours = 24
+        limit = 20
+        if command and command.args:
+            parts = command.args.strip().split()
+            if len(parts) >= 1:
+                parsed_hours = parse_positive_int(parts[0])
+                if parsed_hours is not None:
+                    hours = min(parsed_hours, 240)
+            if len(parts) >= 2:
+                parsed_limit = parse_positive_int(parts[1])
+                if parsed_limit is not None:
+                    limit = min(parsed_limit, 50)
+        rows = await context.trend_collector.list_recent_signals(hours=hours, limit=limit)
+        if not rows:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Нет trend signals за {hours}ч.",
+            )
+            return
+        lines = [f"Trends за {hours}ч (top {len(rows)}):"]
+        for source_name, keyword, weight, observed_at in rows:
+            lines.append(
+                f"{observed_at:%m-%d %H:%M} [{source_name}] {keyword} (w={weight:.2f})"
+            )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("analytics"))
+    async def analytics(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        hours = context.settings.analytics.default_window_hours
+        if command and command.args:
+            parsed = parse_positive_int(command.args.strip())
+            if parsed is None:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Формат: /analytics [hours]",
+                )
+                return
+            hours = min(parsed, context.settings.analytics.max_window_hours)
+        snapshot = await analytics_service.snapshot(window_hours=hours)
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=analytics_service.render(snapshot),
         )
 
     return router

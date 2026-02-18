@@ -14,13 +14,17 @@ from tg_news_bot.db.session import create_session_factory
 from tg_news_bot.logging import configure_logging, get_logger
 from tg_news_bot.monitoring import configure_sentry
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
+from tg_news_bot.repositories.drafts import DraftRepository
+from tg_news_bot.repositories.scheduled_posts import ScheduledPostRepository
 from tg_news_bot.repositories.sources import SourceRepository
+from tg_news_bot.services.analytics import AnalyticsService
 from tg_news_bot.services.edit_sessions import EditSessionService
 from tg_news_bot.services.health import HealthServer
 from tg_news_bot.services.ingestion import IngestionConfig, IngestionRunner
 from tg_news_bot.services.schedule_input import ScheduleInputService
 from tg_news_bot.services.scheduler import SchedulerConfig, SchedulerRunner
 from tg_news_bot.services.text_generation import build_text_pipeline
+from tg_news_bot.services.trends import TrendCollector
 from tg_news_bot.services.workflow import DraftWorkflowService
 from tg_news_bot.telegram.handlers.callbacks import CallbackContext, create_callback_router
 from tg_news_bot.telegram.handlers.editing import EditContext, create_edit_router
@@ -50,6 +54,11 @@ async def _run() -> int:
     publisher = PublisherAdapter(TelegramPublisher(bot))
     dispatcher = Dispatcher()
 
+    trend_collector = TrendCollector(
+        settings=settings.trends,
+        session_factory=session_factory,
+    )
+
     ingestion = IngestionRunner(
         settings=settings,
         session_factory=session_factory,
@@ -58,6 +67,7 @@ async def _run() -> int:
             poll_interval_seconds=settings.rss.poll_interval_seconds,
             max_items_per_source=settings.rss.max_items_per_source,
         ),
+        trend_collector=trend_collector,
     )
 
     workflow_text_pipeline = build_text_pipeline(
@@ -79,6 +89,10 @@ async def _run() -> int:
         publisher=publisher,
         ingestion_runner=ingestion,
         workflow=workflow,
+        trend_collector=trend_collector,
+        scheduled_repo=ScheduledPostRepository(),
+        draft_repo=DraftRepository(),
+        analytics=AnalyticsService(session_factory),
     )
     dispatcher.include_router(create_settings_router(settings_context))
 
@@ -114,6 +128,7 @@ async def _run() -> int:
 
     scheduler_task = None
     ingestion_task = None
+    trend_task = None
     health_server = HealthServer(settings.health)
     await health_server.start()
     if settings.scheduler.enabled:
@@ -131,6 +146,8 @@ async def _run() -> int:
         scheduler_task = asyncio.create_task(scheduler.run())
 
     ingestion_task = asyncio.create_task(ingestion.run())
+    if settings.trends.enabled:
+        trend_task = asyncio.create_task(trend_collector.run())
 
     try:
         await dispatcher.start_polling(bot)
@@ -143,6 +160,10 @@ async def _run() -> int:
             scheduler_task.cancel()
             with suppress(asyncio.CancelledError):
                 await scheduler_task
+        if trend_task:
+            trend_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await trend_task
         await health_server.stop()
         await bot.session.close()
 

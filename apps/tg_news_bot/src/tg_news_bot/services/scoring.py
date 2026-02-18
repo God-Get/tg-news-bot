@@ -25,6 +25,8 @@ class ScoringService:
         title: str | None,
         domain: str | None,
         published_at: datetime | None,
+        trend_boosts: dict[str, float] | None = None,
+        source_trust_score: float | None = None,
     ) -> ScoreResult:
         score = 0.0
         reasons: dict[str, float | str] = {}
@@ -84,5 +86,25 @@ class ScoringService:
                 if domain.endswith(dom):
                     score += boost
                     reasons[f"domain:{dom}"] = boost
+
+        if trend_boosts:
+            trend_applied = 0
+            for keyword, boost in trend_boosts.items():
+                keyword_lc = keyword.lower().strip()
+                if not keyword_lc:
+                    continue
+                if keyword_lc in text_lower:
+                    applied = float(boost)
+                    score += applied
+                    reasons[f"trend:{keyword_lc}"] = applied
+                    trend_applied += 1
+                if trend_applied >= 6:
+                    break
+
+        if source_trust_score is not None:
+            trust = max(min(float(source_trust_score), 10.0), -10.0)
+            trust_boost = trust * 0.15
+            score += trust_boost
+            reasons["source_trust"] = trust_boost
 
         return ScoreResult(score=score, reasons=reasons)

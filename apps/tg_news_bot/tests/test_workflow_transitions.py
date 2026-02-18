@@ -236,3 +236,19 @@ async def test_safe_delete_ignores_delete_not_allowed() -> None:
     )
 
     await workflow._safe_delete(chat_id=-1001, message_id=123)
+
+
+@pytest.mark.asyncio
+async def test_to_ready_fails_on_content_safety() -> None:
+    draft = _make_draft(state=DraftState.EDITING)
+    draft.post_text_ru = "Короткий промо текст buy now"
+    workflow = SpyWorkflow(draft=draft)
+
+    with pytest.raises(ValueError, match="content_safety_failed"):
+        await workflow.transition(
+            TransitionRequest(
+                draft_id=1,
+                action=DraftAction.TO_READY,
+                user_id=1,
+            )
+        )

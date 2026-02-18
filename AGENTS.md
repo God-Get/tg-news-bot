@@ -24,9 +24,10 @@
 
 ## 4. Команды (должны оставаться рабочими)
 - Настройка: `/commands`, `/status`, `/set_group`, `/set_inbox_topic`, `/set_service_topic`, `/set_ready_topic`, `/set_scheduled_topic`, `/set_published_topic`, `/set_archive_topic`, `/set_channel <channel_id>`.
-- Источники: `/add_source <rss_url> [name]`, `/list_sources`, `/set_source_topics <source_id> <topics>`, `/clear_source_topics <source_id>`, `/set_source_ssl_insecure <source_id> <on|off>`, `/enable_source <source_id>`, `/disable_source <source_id>`, `/remove_source <source_id>`.
+- Источники: `/add_source <rss_url> [name]`, `/list_sources`, `/source_quality [source_id]`, `/set_source_topics <source_id> <topics>`, `/clear_source_topics <source_id>`, `/set_source_ssl_insecure <source_id> <on|off>`, `/enable_source <source_id>`, `/disable_source <source_id>`, `/remove_source <source_id>`.
 - Ingestion: `/ingest_now`, `/ingest_source <source_id>`, `/ingest_url <article_url> [source_id]`.
 - Обработка текста: `/process_range <from_id> <to_id>`.
+- Operations: `/scheduled_failed_list [limit]`, `/scheduled_retry <draft_id>`, `/scheduled_cancel <draft_id>`, `/collect_trends`, `/trends [hours] [limit]`, `/analytics [hours]`.
 - Редактирование: `/cancel`.
 
 ## 5. Правила внесения изменений
@@ -53,12 +54,7 @@
 - Проверка контейнеров: `docker compose -f infra/docker-compose.yml ps`.
 
 ## 8. Ближайший бэклог
-- Команды управления failed scheduled-публикациями (list/retry/cancel).
-- Trust score источников и доменов для скоринга.
-- Семантический dedup (near-duplicates по embedding).
-- Метрики и дашборды воронки ingestion -> publish.
-- Авто-теги/рубрикатор и content safety перед READY.
 - Runbook восстановления и backup/restore Postgres.
 - Улучшенный image filtering (анти-логотип, качество).
-- Модуль тренд-аналитики и рекомендаций источников.
+- Точная калибровка весов трендов/trust-score/dedup и safety-порогов на боевых данных.
 - Multi-admin роли и ACL: отложено, пока не завершены пункты выше.

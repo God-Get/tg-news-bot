@@ -29,7 +29,11 @@ from tg_news_bot.services.images import ImageSelector
 from tg_news_bot.services.keyboards import build_state_keyboard
 from tg_news_bot.services.metrics import metrics
 from tg_news_bot.services.rendering import render_card_text, render_post_content
+from tg_news_bot.services.rubricator import RubricatorService
 from tg_news_bot.services.scoring import ScoringService
+from tg_news_bot.services.content_safety import ContentSafetyService
+from tg_news_bot.services.semantic_dedup import SemanticDedupService
+from tg_news_bot.services.source_quality import SourceQualityService
 from tg_news_bot.services.source_text import sanitize_source_text
 from tg_news_bot.services.text_generation import (
     LLMCircuitOpenError,
@@ -39,6 +43,7 @@ from tg_news_bot.services.text_generation import (
     TextPipeline,
     build_text_pipeline,
 )
+from tg_news_bot.services.trends import TrendCollector
 from tg_news_bot.utils.url import extract_domain, normalize_title_key, normalize_url
 
 
@@ -61,6 +66,7 @@ class IngestionStats:
     skipped_low_score: int = 0
     skipped_invalid_entry: int = 0
     skipped_no_html: int = 0
+    skipped_unsafe: int = 0
     skipped_blocked: int = 0
     skipped_rate_limited: int = 0
     rss_fetch_errors: int = 0
@@ -73,6 +79,7 @@ class IngestionStats:
                 self.skipped_low_score,
                 self.skipped_invalid_entry,
                 self.skipped_no_html,
+                self.skipped_unsafe,
                 self.skipped_blocked,
                 self.skipped_rate_limited,
                 self.rss_fetch_errors,
@@ -96,6 +103,7 @@ class IngestionRunner:
         session_factory: async_sessionmaker[AsyncSession],
         publisher: PublisherPort,
         config: IngestionConfig,
+        trend_collector: TrendCollector | None = None,
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
@@ -110,6 +118,14 @@ class IngestionRunner:
         self._settings_repo = BotSettingsRepository()
         self._extractor = ArticleExtractor()
         self._scoring = ScoringService(settings.scoring)
+        self._trend_collector = trend_collector
+        self._rubricator = RubricatorService()
+        self._content_safety = ContentSafetyService(settings.content_safety)
+        self._source_quality = SourceQualityService(settings.source_quality)
+        self._semantic_dedup = SemanticDedupService(
+            settings=settings.semantic_dedup,
+            session_factory=session_factory,
+        )
         self._text_pipeline: TextPipeline = build_text_pipeline(
             settings.text_generation,
             settings.llm,
@@ -135,6 +151,7 @@ class IngestionRunner:
                             skipped_low_score=stats.skipped_low_score,
                             skipped_invalid_entry=stats.skipped_invalid_entry,
                             skipped_no_html=stats.skipped_no_html,
+                            skipped_unsafe=stats.skipped_unsafe,
                             skipped_blocked=stats.skipped_blocked,
                             skipped_rate_limited=stats.skipped_rate_limited,
                             rss_fetch_errors=stats.rss_fetch_errors,
@@ -166,7 +183,8 @@ class IngestionRunner:
             return ManualIngestResult(created=False, reason="invalid_url")
         normalized_url = normalized_candidates[0]
         resolved_topic_hints = topic_hints or []
-        if source_id is not None and not resolved_topic_hints:
+        source_trust_score = 0.0
+        if source_id is not None:
             async with self._session_factory() as session:
                 async with session.begin():
                     source = await self._sources_repo.get_by_id(session, source_id)
@@ -177,15 +195,20 @@ class IngestionRunner:
                             reason="source_not_found",
                         )
                     source_tags = source.tags if isinstance(source.tags, dict) else None
-                    resolved_topic_hints = self._topic_hints_from_tags(source_tags)
+                    source_trust_score = float(source.trust_score or 0.0)
+                    if not resolved_topic_hints:
+                        resolved_topic_hints = self._topic_hints_from_tags(source_tags)
 
         stats = IngestionStats()
         entry = {"id": url, "link": url}
+        trend_boosts = await self._get_trend_boosts()
         async with AsyncClient(follow_redirects=True, timeout=20) as http:
             created = await self._process_entry(
                 source_id,
                 entry,
                 resolved_topic_hints,
+                source_trust_score,
+                trend_boosts,
                 http,
                 stats,
             )
@@ -199,6 +222,8 @@ class IngestionRunner:
                 reason = "low_score"
             elif stats.skipped_no_html:
                 reason = "no_html"
+            elif stats.skipped_unsafe:
+                reason = "unsafe"
             elif stats.skipped_invalid_entry:
                 reason = "invalid_entry"
             else:
@@ -275,7 +300,14 @@ class IngestionRunner:
                 stats.skipped_rate_limited += 1
                 metrics.inc_counter("ingestion_sources_skipped_total", labels={"reason": "rate_limited"})
                 continue
-            await self._process_source(source.id, source.url, source.tags, http, stats)
+            await self._process_source(
+                source.id,
+                source.url,
+                source.tags,
+                float(source.trust_score or 0.0),
+                http,
+                stats,
+            )
             self._source_last_poll[source.id] = now
         return stats
 
@@ -284,10 +316,12 @@ class IngestionRunner:
         source_id: int,
         source_url: str,
         source_tags: dict | None,
+        source_trust_score: float,
         http: AsyncClient,
         stats: IngestionStats,
     ) -> None:
         topic_hints = self._topic_hints_from_tags(source_tags)
+        trend_boosts = await self._get_trend_boosts()
         response = await self._fetch_url_with_ssl_policy(
             source_url,
             http=http,
@@ -317,7 +351,15 @@ class IngestionRunner:
         entries = feed.entries[: self._config.max_items_per_source]
         for entry in entries:
             stats.entries_total += 1
-            if await self._process_entry(source_id, entry, topic_hints, http, stats):
+            if await self._process_entry(
+                source_id,
+                entry,
+                topic_hints,
+                source_trust_score,
+                trend_boosts,
+                http,
+                stats,
+            ):
                 stats.created += 1
 
     async def _process_entry(
@@ -325,12 +367,15 @@ class IngestionRunner:
         source_id: int | None,
         entry,
         topic_hints: list[str],
+        source_trust_score: float,
+        trend_boosts: dict[str, float],
         http: AsyncClient,
         stats: IngestionStats,
     ) -> bool:
         link = entry.get("link") or entry.get("id")
         if not link:
             stats.skipped_invalid_entry += 1
+            await self._record_source_quality_event(source_id=source_id, event="invalid_entry")
             return False
 
         normalized_candidates = self._normalized_url_candidates(
@@ -339,11 +384,13 @@ class IngestionRunner:
         )
         if not normalized_candidates:
             stats.skipped_invalid_entry += 1
+            await self._record_source_quality_event(source_id=source_id, event="invalid_entry")
             return False
         normalized = normalized_candidates[0]
         domain = extract_domain(normalized)
         if not domain:
             stats.skipped_invalid_entry += 1
+            await self._record_source_quality_event(source_id=source_id, event="invalid_entry")
             return False
         title_en = entry.get("title")
         blocked_reason = self._blocked_reason(
@@ -356,6 +403,11 @@ class IngestionRunner:
             metrics.inc_counter(
                 "ingestion_entries_skipped_total",
                 labels={"reason": "blocked"},
+            )
+            await self._record_source_quality_event(
+                source_id=source_id,
+                event="blocked",
+                details={"reason": blocked_reason},
             )
             self._log.info(
                 "ingestion.skipped_blocked",
@@ -394,16 +446,73 @@ class IngestionRunner:
                         "ingestion_duplicates_total",
                         labels={"reason": "url" if has_duplicate_url else "title"},
                     )
+                    await self._record_source_quality_event(
+                        source_id=source_id,
+                        event="duplicate",
+                        details={"type": "url" if has_duplicate_url else "title"},
+                    )
                     return False
 
         html = await self._fetch_html(link, http)
         if not html:
             stats.skipped_no_html += 1
+            await self._record_source_quality_event(source_id=source_id, event="no_html")
             return False
 
         extracted = self._extractor.extract(html)
         title_en = entry.get("title") or extracted.title
         text_en = sanitize_source_text(extracted.text)
+
+        near_duplicate = await self._semantic_dedup.find_near_duplicate(
+            normalized_url=normalized,
+            domain=domain,
+            title=title_en,
+            text=text_en,
+        )
+        if near_duplicate is not None:
+            stats.duplicates += 1
+            metrics.inc_counter(
+                "ingestion_duplicates_total",
+                labels={"reason": "semantic"},
+            )
+            await self._record_source_quality_event(
+                source_id=source_id,
+                event="near_duplicate",
+                details={
+                    "matched_url": near_duplicate.normalized_url,
+                    "similarity": round(near_duplicate.similarity, 4),
+                },
+            )
+            return False
+
+        safety = self._content_safety.check(text=text_en, title=title_en)
+        if not safety.allowed:
+            stats.skipped_unsafe += 1
+            metrics.inc_counter(
+                "ingestion_entries_skipped_total",
+                labels={"reason": "unsafe"},
+            )
+            await self._record_source_quality_event(
+                source_id=source_id,
+                event="unsafe",
+                details={"reasons": safety.reasons},
+            )
+            self._log.info(
+                "ingestion.skipped_unsafe",
+                normalized_url=normalized,
+                reasons=safety.reasons,
+            )
+            return False
+
+        trend_keywords = list(trend_boosts.keys())[:6]
+        rubrication = self._rubricator.classify(
+            title=title_en,
+            text=text_en,
+            trend_keywords=trend_keywords,
+        )
+        effective_topic_hints = topic_hints
+        if not effective_topic_hints and rubrication.topics:
+            effective_topic_hints = list(rubrication.topics)
 
         published_at = self._parse_published(entry)
         score = self._scoring.score(
@@ -411,9 +520,12 @@ class IngestionRunner:
             title=title_en,
             domain=domain,
             published_at=published_at,
+            trend_boosts=trend_boosts,
+            source_trust_score=source_trust_score,
         )
         if score.score < self._settings.scoring.min_score:
             stats.skipped_low_score += 1
+            await self._record_source_quality_event(source_id=source_id, event="low_score")
             self._log.info(
                 "ingestion.skipped_low_score",
                 normalized_url=normalized,
@@ -421,6 +533,15 @@ class IngestionRunner:
                 min_score=self._settings.scoring.min_score,
             )
             return False
+
+        score_reasons = dict(score.reasons)
+        score_reasons["safety_quality"] = safety.quality_score
+        if safety.reasons:
+            score_reasons["safety_flags"] = safety.reasons
+        if rubrication.topics:
+            score_reasons["auto_topics"] = rubrication.topics
+        if rubrication.hashtags:
+            score_reasons["auto_hashtags"] = rubrication.hashtags
 
         image_selector = ImageSelector(self._settings.images, http)
         image = await image_selector.select(html, link)
@@ -452,7 +573,7 @@ class IngestionRunner:
                     generated = await self._text_pipeline.generate_parts(
                         title_en=title_en,
                         text_en=text_en,
-                        topic_hints=topic_hints,
+                        topic_hints=effective_topic_hints,
                     )
                     generated_title_ru = generated.title_ru
                     generated_summary_ru = generated.summary_ru
@@ -473,7 +594,7 @@ class IngestionRunner:
                     post_text_ru = await self._fallback_text_pipeline.generate_post(
                         title_en=title_en,
                         text_en=text_en,
-                        topic_hints=topic_hints,
+                        topic_hints=effective_topic_hints,
                     )
                 except Exception:
                     self._log.exception(
@@ -490,7 +611,7 @@ class IngestionRunner:
                     post_text_ru = await self._fallback_text_pipeline.generate_post(
                         title_en=title_en,
                         text_en=text_en,
-                        topic_hints=topic_hints,
+                        topic_hints=effective_topic_hints,
                     )
 
         article = Article(
@@ -517,7 +638,7 @@ class IngestionRunner:
             extracted_text_expires_at=datetime.now(timezone.utc)
             + timedelta(days=self._settings.extracted_text_ttl_days),
             score=score.score,
-            score_reasons=score.reasons,
+            score_reasons=score_reasons,
             post_text_ru=post_text_ru,
             source_image_url=image.url,
             has_image=image.status == ImageStatus.OK,
@@ -547,7 +668,7 @@ class IngestionRunner:
                                 if self._settings.llm.enabled
                                 else "stub"
                             ),
-                            topic_hints=topic_hints,
+                            topic_hints=effective_topic_hints,
                             title_ru=generated_title_ru,
                             summary_ru=generated_summary_ru,
                         )
@@ -558,6 +679,7 @@ class IngestionRunner:
                     draft_id = draft.id
         except IntegrityError:
             stats.duplicates += 1
+            await self._record_source_quality_event(source_id=source_id, event="duplicate")
             return False
 
         self._log.info(
@@ -566,6 +688,13 @@ class IngestionRunner:
             source_id=source_id,
             score=score.score,
             image_status=image.status,
+        )
+        await self._record_source_quality_event(source_id=source_id, event="created")
+        await self._semantic_dedup.store(
+            normalized_url=normalized,
+            domain=domain,
+            title=title_en,
+            text=text_en,
         )
         metrics.inc_counter("drafts_created_total")
         metrics.inc_counter("drafts_state_total", labels={"state": DraftState.INBOX.value})
@@ -731,6 +860,44 @@ class IngestionRunner:
         if last_error:
             raise last_error
         raise RuntimeError("send_text retry loop failed unexpectedly")
+
+    async def _get_trend_boosts(self) -> dict[str, float]:
+        collector = getattr(self, "_trend_collector", None)
+        if collector is None:
+            return {}
+        try:
+            return await collector.get_keyword_boosts(max_items=80)
+        except Exception:
+            self._log.exception("ingestion.trend_boosts_failed")
+            return {}
+
+    async def _record_source_quality_event(
+        self,
+        *,
+        source_id: int | None,
+        event: str,
+        details: dict | None = None,
+    ) -> None:
+        if source_id is None:
+            return
+        source_quality = getattr(self, "_source_quality", None)
+        if source_quality is None:
+            return
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await source_quality.apply_event(
+                        session,
+                        source_id=source_id,
+                        event=event,
+                        details=details,
+                    )
+        except Exception:
+            self._log.exception(
+                "ingestion.source_quality_update_failed",
+                source_id=source_id,
+                event=event,
+            )
 
     @staticmethod
     def _topic_hints_from_tags(source_tags: dict | None) -> list[str]:

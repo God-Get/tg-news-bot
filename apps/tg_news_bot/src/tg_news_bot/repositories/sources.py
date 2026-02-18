@@ -33,12 +33,14 @@ class SourceRepository:
         url: str,
         enabled: bool = True,
         tags: dict | None = None,
+        trust_score: float = 0.0,
     ) -> Source:
         source = Source(
             name=name,
             url=url,
             enabled=enabled,
             tags=tags,
+            trust_score=trust_score,
         )
         session.add(source)
         await session.flush()

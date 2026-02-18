@@ -70,6 +70,19 @@ def test_render_post_content_formats_title_text_hashtags_and_source() -> None:
     assert '<a href="https://example.com/item">Источник</a>' not in content.text
 
 
+def test_render_post_content_uses_auto_hashtags_from_reasons() -> None:
+    draft = _make_draft(
+        state=DraftState.INBOX,
+        post_text_ru="Заголовок\n\nТекст поста",
+        score_reasons={"auto_hashtags": ["#ai", "space_flight"]},
+    )
+
+    content = render_post_content(draft)
+
+    assert "#ai" in content.text
+    assert "#space_flight" in content.text
+
+
 def test_render_post_content_uses_defaults_when_data_missing() -> None:
     draft = _make_draft(
         state=DraftState.INBOX,

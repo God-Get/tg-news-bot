@@ -50,6 +50,29 @@ RSS hardening:
 Scoring tuning:
 - `SCORING__TITLE_KEYWORD_MULTIPLIER=1.3`
 
+Trends:
+- `TRENDS__ENABLED=true`
+- `TRENDS__COLLECT_INTERVAL_SECONDS=1800`
+- `TRENDS__LOOKBACK_HOURS=48`
+- `TRENDS__HN_TOP_N=80`
+- `TRENDS__X_FEEDS=["https://<your-x-rss-feed>"]` (optional)
+
+Source quality:
+- `SOURCE_QUALITY__ENABLED=true`
+- `SOURCE_QUALITY__AUTO_DISABLE_ENABLED=true`
+- `SOURCE_QUALITY__AUTO_DISABLE_THRESHOLD=-4.0`
+- `SOURCE_QUALITY__MIN_EVENTS_FOR_AUTO_DISABLE=12`
+
+Semantic dedup:
+- `SEMANTIC_DEDUP__ENABLED=true`
+- `SEMANTIC_DEDUP__SIMILARITY_THRESHOLD=0.92`
+- `SEMANTIC_DEDUP__LOOKBACK_HOURS=120`
+
+Content safety:
+- `CONTENT_SAFETY__ENABLED=true`
+- `CONTENT_SAFETY__MIN_READY_CHARS=140`
+- `CONTENT_SAFETY__MAX_LINKS_IN_TEXT=6`
+
 Post formatting:
 - `POST_FORMATTING__SECTIONS_ORDER=title,body,hashtags,source`
 - `POST_FORMATTING__HASHTAGS_LIMIT=5`
@@ -83,6 +106,16 @@ Schedule UX:
 - contains `title + body + hashtags`
 - has source as inline button (`Источник`)
 - does not contain raw source URL in text (when `POST_FORMATTING__SOURCE_MODE=button`).
+
+## Operations Commands
+
+- `/scheduled_failed_list [limit]`
+- `/scheduled_retry <draft_id>`
+- `/scheduled_cancel <draft_id>`
+- `/collect_trends`
+- `/trends [hours] [limit]`
+- `/analytics [hours]`
+- `/source_quality [source_id]`
 
 ## Roadmap
 

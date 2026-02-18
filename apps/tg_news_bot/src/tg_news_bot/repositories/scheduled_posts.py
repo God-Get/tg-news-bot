@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,3 +103,35 @@ class ScheduledPostRepository:
             )
         )
         return int(result.scalar_one())
+
+    async def list_failed(
+        self,
+        session: AsyncSession,
+        *,
+        limit: int = 20,
+    ) -> list[ScheduledPost]:
+        result = await session.execute(
+            select(ScheduledPost)
+            .where(ScheduledPost.status == ScheduledPostStatus.FAILED)
+            .order_by(ScheduledPost.updated_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def retry_now_by_draft(self, session: AsyncSession, *, draft_id: int) -> bool:
+        scheduled = await self.get_by_draft(session, draft_id)
+        if scheduled is None:
+            return False
+        scheduled.status = ScheduledPostStatus.FAILED
+        scheduled.next_retry_at = datetime.now(timezone.utc)
+        await session.flush()
+        return True
+
+    async def cancel_by_draft(self, session: AsyncSession, *, draft_id: int) -> bool:
+        scheduled = await self.get_by_draft(session, draft_id)
+        if scheduled is None:
+            return False
+        scheduled.status = ScheduledPostStatus.CANCELLED
+        scheduled.next_retry_at = None
+        await session.flush()
+        return True

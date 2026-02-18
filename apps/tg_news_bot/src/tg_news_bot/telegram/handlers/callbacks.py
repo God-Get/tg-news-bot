@@ -242,13 +242,18 @@ def create_callback_router(context: CallbackContext) -> Router:
                 action=parsed.action,
             )
             await safe_answer(query, text="Draft не найден")
-        except ValueError:
+        except ValueError as exc:
             log.warning(
                 "callback.invalid_transition",
                 draft_id=parsed.draft_id,
                 action=parsed.action,
             )
-            await safe_answer(query, text="Переход недоступен")
+            error_text = str(exc)
+            if error_text.startswith("content_safety_failed:"):
+                details = error_text.removeprefix("content_safety_failed:").strip()
+                await safe_answer(query, text=f"Контент не прошёл safety: {details}")
+            else:
+                await safe_answer(query, text="Переход недоступен")
         except Exception:
             log.exception(
                 "callback.unhandled_error",

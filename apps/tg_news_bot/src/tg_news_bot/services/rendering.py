@@ -219,6 +219,14 @@ def _extract_hashtags(
     seen: set[str] = set()
 
     reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+    auto_hashtags = reasons.get("auto_hashtags")
+    if isinstance(auto_hashtags, list):
+        for item in auto_hashtags:
+            normalized = _normalize_tag(str(item).lstrip("#"))
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                tags.append(f"#{normalized}")
+
     for key in reasons:
         if key.startswith("kw:"):
             tag = _normalize_tag(key.removeprefix("kw:"))

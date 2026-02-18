@@ -57,6 +57,13 @@ class PublishFailureContext(enum.StrEnum):
     MANUAL = "MANUAL"
 
 
+class TrendSignalSource(enum.StrEnum):
+    ARXIV = "ARXIV"
+    HN = "HN"
+    X = "X"
+    REDDIT = "REDDIT"
+
+
 class BotSettings(Base):
     __tablename__ = "bot_settings"
 
@@ -86,6 +93,7 @@ class Source(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    trust_score: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     tags: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -349,4 +357,38 @@ class PublishFailure(Base):
     draft: Mapped[Draft] = relationship("Draft", back_populates="publish_failures")
     scheduled_post: Mapped[ScheduledPost | None] = relationship(
         "ScheduledPost", back_populates="publish_failures"
+    )
+
+
+class TrendSignal(Base):
+    __tablename__ = "trend_signals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[TrendSignalSource] = mapped_column(
+        Enum(TrendSignalSource, name="trend_signal_source"),
+        nullable=False,
+    )
+    keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class SemanticFingerprint(Base):
+    __tablename__ = "semantic_fingerprints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    normalized_url: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vector: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    text_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )

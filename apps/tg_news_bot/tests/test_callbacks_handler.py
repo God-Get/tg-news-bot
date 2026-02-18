@@ -400,3 +400,16 @@ async def test_callback_transition_errors_are_reported() -> None:
     query_value = _Query(data="draft:1:publish_now")
     await handler_value(query_value)
     assert query_value.answers == ["Переход недоступен"]
+
+
+@pytest.mark.asyncio
+async def test_callback_content_safety_error_is_reported() -> None:
+    workflow = _WorkflowSpy(transition_exc=ValueError("content_safety_failed:ad:sponsored"))
+    edit_sessions = _EditSessionsSpy()
+    schedule_input = _ScheduleInputSpy()
+    handler = _get_handler(_make_context(workflow, edit_sessions, schedule_input))
+    query = _Query(data="draft:1:to_ready")
+
+    await handler(query)
+
+    assert query.answers == ["Контент не прошёл safety: ad:sponsored"]
