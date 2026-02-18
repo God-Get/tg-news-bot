@@ -106,6 +106,32 @@ async def test_publisher_adapter_delegates_send_and_edit_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_publisher_adapter_send_text_defaults_keyboard_to_none() -> None:
+    spy = _PublisherSpy()
+    adapter = PublisherAdapter(spy)  # type: ignore[arg-type]
+
+    result = await adapter.send_text(
+        chat_id=-1001,
+        topic_id=12,
+        text="help",
+    )
+
+    assert result.message_id == 102
+    assert spy.calls == [
+        (
+            "send_text",
+            {
+                "chat_id": -1001,
+                "topic_id": 12,
+                "text": "help",
+                "keyboard": None,
+                "parse_mode": None,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_publisher_adapter_maps_upstream_not_found() -> None:
     adapter = PublisherAdapter(_DeleteNotFoundPublisher())  # type: ignore[arg-type]
 

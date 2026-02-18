@@ -80,6 +80,14 @@ class IngestionStats:
         )
 
 
+@dataclass(slots=True)
+class ManualIngestResult:
+    created: bool
+    normalized_url: str | None = None
+    draft_id: int | None = None
+    reason: str | None = None
+
+
 class IngestionRunner:
     def __init__(
         self,
@@ -145,6 +153,70 @@ class IngestionRunner:
     async def run_once(self, *, source_ids: set[int] | None = None) -> IngestionStats:
         async with AsyncClient(follow_redirects=True, timeout=20) as http:
             return await self._poll_with_lock(http, source_ids=source_ids)
+
+    async def ingest_url(
+        self,
+        *,
+        url: str,
+        source_id: int | None = None,
+        topic_hints: list[str] | None = None,
+    ) -> ManualIngestResult:
+        normalized_candidates = self._normalized_url_candidates(url, entry_id=url)
+        if not normalized_candidates:
+            return ManualIngestResult(created=False, reason="invalid_url")
+        normalized_url = normalized_candidates[0]
+        resolved_topic_hints = topic_hints or []
+        if source_id is not None and not resolved_topic_hints:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    source = await self._sources_repo.get_by_id(session, source_id)
+                    if not source:
+                        return ManualIngestResult(
+                            created=False,
+                            normalized_url=normalized_url,
+                            reason="source_not_found",
+                        )
+                    source_tags = source.tags if isinstance(source.tags, dict) else None
+                    resolved_topic_hints = self._topic_hints_from_tags(source_tags)
+
+        stats = IngestionStats()
+        entry = {"id": url, "link": url}
+        async with AsyncClient(follow_redirects=True, timeout=20) as http:
+            created = await self._process_entry(
+                source_id,
+                entry,
+                resolved_topic_hints,
+                http,
+                stats,
+            )
+
+        if not created:
+            if stats.duplicates:
+                reason = "duplicate"
+            elif stats.skipped_blocked:
+                reason = "blocked"
+            elif stats.skipped_low_score:
+                reason = "low_score"
+            elif stats.skipped_no_html:
+                reason = "no_html"
+            elif stats.skipped_invalid_entry:
+                reason = "invalid_entry"
+            else:
+                reason = "not_created"
+            return ManualIngestResult(
+                created=False,
+                normalized_url=normalized_url,
+                reason=reason,
+            )
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                draft = await self._draft_repo.get_by_normalized_url(session, normalized_url)
+        return ManualIngestResult(
+            created=True,
+            normalized_url=normalized_url,
+            draft_id=draft.id if draft else None,
+        )
 
     async def _poll_with_lock(
         self,
@@ -250,7 +322,7 @@ class IngestionRunner:
 
     async def _process_entry(
         self,
-        source_id: int,
+        source_id: int | None,
         entry,
         topic_hints: list[str],
         http: AsyncClient,

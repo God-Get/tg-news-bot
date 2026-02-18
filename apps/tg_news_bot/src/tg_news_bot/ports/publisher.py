@@ -39,7 +39,7 @@ class PublisherPort(Protocol):
         chat_id: int,
         topic_id: int | None,
         text: str,
-        keyboard,
+        keyboard=None,
         parse_mode: str | None = None,
     ) -> SendResult: ...
 

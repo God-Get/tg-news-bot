@@ -37,6 +37,123 @@ class SettingsContext:
 
 def create_settings_router(context: SettingsContext) -> Router:
     router = Router()
+    command_meta = {
+        "commands": {"syntax": "/commands", "description": "показать эту справку"},
+        "status": {"syntax": "/status", "description": "показать текущие настройки"},
+        "set_group": {"syntax": "/set_group", "description": "сохранить group_chat_id"},
+        "set_inbox_topic": {
+            "syntax": "/set_inbox_topic",
+            "description": "сохранить INBOX topic_id",
+        },
+        "set_service_topic": {
+            "syntax": "/set_service_topic",
+            "description": "сохранить EDITING topic_id",
+        },
+        "set_ready_topic": {
+            "syntax": "/set_ready_topic",
+            "description": "сохранить READY topic_id",
+        },
+        "set_scheduled_topic": {
+            "syntax": "/set_scheduled_topic",
+            "description": "сохранить SCHEDULED topic_id",
+        },
+        "set_published_topic": {
+            "syntax": "/set_published_topic",
+            "description": "сохранить PUBLISHED topic_id",
+        },
+        "set_archive_topic": {
+            "syntax": "/set_archive_topic",
+            "description": "сохранить ARCHIVE topic_id",
+        },
+        "set_channel": {
+            "syntax": "/set_channel <channel_id>",
+            "description": "сохранить канал публикации",
+        },
+        "add_source": {
+            "syntax": "/add_source <rss_url> [name]",
+            "description": "добавить/обновить RSS-источник",
+        },
+        "list_sources": {
+            "syntax": "/list_sources",
+            "description": "показать список источников",
+        },
+        "set_source_topics": {
+            "syntax": "/set_source_topics <source_id> <topics>",
+            "description": "задать topic hints источнику",
+        },
+        "clear_source_topics": {
+            "syntax": "/clear_source_topics <source_id>",
+            "description": "очистить topic hints источника",
+        },
+        "set_source_ssl_insecure": {
+            "syntax": "/set_source_ssl_insecure <source_id> <on|off>",
+            "description": "включить/выключить insecure SSL fallback",
+        },
+        "enable_source": {
+            "syntax": "/enable_source <source_id>",
+            "description": "включить источник",
+        },
+        "disable_source": {
+            "syntax": "/disable_source <source_id>",
+            "description": "выключить источник",
+        },
+        "remove_source": {
+            "syntax": "/remove_source <source_id>",
+            "description": "удалить источник (или выключить при linked data)",
+        },
+        "ingest_now": {
+            "syntax": "/ingest_now",
+            "description": "принудительный запуск RSS ingestion",
+        },
+        "ingest_source": {
+            "syntax": "/ingest_source <source_id>",
+            "description": "ingestion только одного источника",
+        },
+        "ingest_url": {
+            "syntax": "/ingest_url <article_url> [source_id]",
+            "description": "добавить статью по ссылке во Входящие",
+        },
+        "process_range": {
+            "syntax": "/process_range <from_id> <to_id>",
+            "description": "пакетная выжимка/перевод для диапазона Draft ID",
+        },
+        # editing router command
+        "cancel": {
+            "syntax": "/cancel",
+            "description": "отменить активную edit-сессию в EDITING topic",
+        },
+    }
+    command_sections = {
+        "Общие": {"commands", "status"},
+        "Настройка группы/топиков": {
+            "set_group",
+            "set_inbox_topic",
+            "set_service_topic",
+            "set_ready_topic",
+            "set_scheduled_topic",
+            "set_published_topic",
+            "set_archive_topic",
+            "set_channel",
+        },
+        "Источники": {
+            "add_source",
+            "list_sources",
+            "set_source_topics",
+            "clear_source_topics",
+            "set_source_ssl_insecure",
+            "enable_source",
+            "disable_source",
+            "remove_source",
+        },
+        "Ingestion/обработка": {
+            "ingest_now",
+            "ingest_source",
+            "ingest_url",
+            "process_range",
+        },
+        "EDITING": {"cancel"},
+    }
+    preferred_order = list(command_meta.keys())
 
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and message.from_user.id == context.settings.admin_user_id)
@@ -75,6 +192,83 @@ def create_settings_router(context: SettingsContext) -> Router:
         if first <= 0 or second <= 0:
             return None
         return min(first, second), max(first, second)
+
+    def parse_ingest_url_args(raw: str) -> tuple[str, int | None] | None:
+        parts = raw.strip().split()
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0], None
+        if len(parts) == 2:
+            try:
+                source_id = int(parts[1])
+            except ValueError:
+                return None
+            if source_id <= 0:
+                return None
+            return parts[0], source_id
+        return None
+
+    def _discover_router_commands() -> list[str]:
+        discovered: list[str] = []
+        for handler in router.message.handlers:
+            for filter_obj in handler.filters:
+                command_filter = getattr(filter_obj, "callback", None)
+                names = getattr(command_filter, "commands", None)
+                if not names:
+                    continue
+                for name in names:
+                    command_name = str(name).strip().lstrip("/").lower()
+                    if command_name and command_name not in discovered:
+                        discovered.append(command_name)
+        return discovered
+
+    def render_commands_help() -> str:
+        discovered = _discover_router_commands()
+        for extra in ("cancel",):
+            if extra not in discovered:
+                discovered.append(extra)
+
+        ordered = [item for item in preferred_order if item in discovered]
+        ordered.extend(sorted(item for item in discovered if item not in ordered))
+
+        lines = ["Доступные команды (admin):", ""]
+        for section_title, section_items in command_sections.items():
+            rows = [item for item in ordered if item in section_items]
+            if not rows:
+                continue
+            lines.append(f"{section_title}:")
+            for name in rows:
+                meta = command_meta.get(name, {})
+                syntax = meta.get("syntax", f"/{name}")
+                description = meta.get("description")
+                if description:
+                    lines.append(f"{syntax} - {description}")
+                else:
+                    lines.append(syntax)
+            lines.append("")
+
+        other = [item for item in ordered if not any(item in group for group in command_sections.values())]
+        if other:
+            lines.append("Прочее:")
+            for name in other:
+                meta = command_meta.get(name, {})
+                syntax = meta.get("syntax", f"/{name}")
+                description = meta.get("description")
+                if description:
+                    lines.append(f"{syntax} - {description}")
+                else:
+                    lines.append(syntax)
+            lines.append("")
+
+        lines.extend(
+            [
+                "Подсказка:",
+                "Команды /set_*_topic запускайте внутри нужного топика.",
+                "Остальные можно запускать в #General.",
+            ]
+        )
+        return "\n".join(lines)
 
     def render_ingestion_stats(stats: IngestionStats) -> str:
         lines = [
@@ -337,6 +531,16 @@ def create_settings_router(context: SettingsContext) -> Router:
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             text="\n".join(lines),
+        )
+
+    @router.message(Command("commands"))
+    async def commands_help(message: Message) -> None:
+        if not is_admin(message):
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=render_commands_help(),
         )
 
     @router.message(Command("add_source"))
@@ -822,6 +1026,95 @@ def create_settings_router(context: SettingsContext) -> Router:
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             text=render_ingestion_stats(stats),
+        )
+
+    @router.message(Command("ingest_url"))
+    async def ingest_url(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.ingestion_runner is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Ingestion недоступен в текущей конфигурации.",
+            )
+            return
+        if not command.args:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /ingest_url <article_url> [source_id]",
+            )
+            return
+        parsed_args = parse_ingest_url_args(command.args)
+        if not parsed_args:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /ingest_url <article_url> [source_id]",
+            )
+            return
+        article_url, source_id = parsed_args
+        if not valid_source_url(article_url):
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Некорректный URL. Нужен http/https URL статьи.",
+            )
+            return
+
+        preface = "Запускаю обработку статьи по ссылке..."
+        if source_id is not None:
+            preface = f"Запускаю обработку статьи по ссылке (source #{source_id})..."
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=preface,
+        )
+        try:
+            result = await context.ingestion_runner.ingest_url(
+                url=article_url,
+                source_id=source_id,
+            )
+        except Exception:
+            log.exception("settings.ingest_url_failed", article_url=article_url)
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Ошибка обработки ссылки. Смотри логи контейнера.",
+            )
+            return
+
+        if result.created:
+            draft_label = f"#{result.draft_id}" if result.draft_id is not None else "создан"
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=(
+                    f"Готово: Draft {draft_label} отправлен во Входящие.\n"
+                    f"url: {result.normalized_url or article_url}"
+                ),
+            )
+            return
+
+        reason_map = {
+            "duplicate": "Дубликат: такой материал уже есть в drafts/articles.",
+            "blocked": "URL отклонён правилами blocked_domains/keywords.",
+            "low_score": "Материал отклонён: score ниже порога.",
+            "no_html": "Не удалось получить HTML страницы.",
+            "invalid_entry": "Не удалось обработать ссылку как статью.",
+            "invalid_url": "Некорректный URL.",
+            "source_not_found": "Источник не найден. Проверьте source_id.",
+            "not_created": "Материал не был создан (неизвестная причина).",
+        }
+        reason_text = reason_map.get(result.reason or "", "Материал не был создан.")
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=(
+                f"{reason_text}\n"
+                f"url: {result.normalized_url or article_url}"
+            ),
         )
 
     @router.message(Command("process_range"))
