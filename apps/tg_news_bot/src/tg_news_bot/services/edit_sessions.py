@@ -146,6 +146,8 @@ class EditSessionService:
             return None
 
         draft = await self._draft_repo.get_for_update(session, active.draft_id)
+        previous_post_message_id = draft.post_message_id
+        previous_card_message_id = draft.card_message_id
 
         text_updated = False
         if payload.text is not None:
@@ -164,7 +166,19 @@ class EditSessionService:
             text_updated=text_updated,
             new_photo=payload.photo_file_id,
         )
-        await self._update_card_message(draft)
+        try:
+            await self._update_card_message(draft)
+        except Exception:
+            # Keep POST/CARD invariant when both messages are created from scratch.
+            if (
+                previous_post_message_id is None
+                and previous_card_message_id is None
+                and draft.post_message_id is not None
+                and draft.group_chat_id is not None
+            ):
+                await self._safe_delete(draft.group_chat_id, draft.post_message_id)
+                draft.post_message_id = None
+            raise
 
         await self._safe_delete(payload.chat_id, payload.message_id)
         await self._finalize(session, active, EditSessionStatus.COMPLETED)

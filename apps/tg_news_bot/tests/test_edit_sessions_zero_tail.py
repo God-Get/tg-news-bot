@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -112,6 +112,7 @@ class _Publisher:
     deleted_message_ids: list[int] = field(default_factory=list)
     post_edit_calls: int = 0
     card_edit_calls: int = 0
+    fail_card_send: bool = False
 
     async def send_text(
         self,
@@ -122,6 +123,8 @@ class _Publisher:
         keyboard=None,  # noqa: ANN001
         parse_mode: str | None = None,  # noqa: ARG002
     ) -> SendResult:
+        if self.fail_card_send and keyboard is None:
+            raise RuntimeError("card send failed")
         message_id = self.next_message_id
         self.next_message_id += 1
         if keyboard and text.startswith("Draft #"):
@@ -246,3 +249,62 @@ async def test_ten_edit_cycles_do_not_accumulate_tail_messages() -> None:
     assert admin_message_ids.issubset(set(publisher.deleted_message_ids))
     assert all(item.status == EditSessionStatus.COMPLETED for item in edit_repo.sessions)
     assert len(edit_repo.sessions) == 10
+
+
+@pytest.mark.asyncio
+async def test_apply_edit_rolls_back_new_post_if_card_create_fails() -> None:
+    draft = Draft(
+        id=2,
+        state=DraftState.EDITING,
+        normalized_url="https://example.com/article2",
+        domain="example.com",
+        title_en="Title",
+        post_text_ru="init",
+        group_chat_id=-1001,
+        topic_id=12,
+        post_message_id=None,
+        card_message_id=None,
+    )
+    settings_repo = _SettingsRepo(
+        BotSettings(group_chat_id=-1001, editing_topic_id=12),
+    )
+    draft_repo = _DraftRepo(draft)
+    active_session = EditSession(
+        id=1,
+        draft_id=2,
+        group_chat_id=-1001,
+        topic_id=12,
+        user_id=10,
+        instruction_message_id=999,
+        status=EditSessionStatus.ACTIVE,
+        started_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    edit_repo = _EditRepo(sessions=[active_session], next_id=2)
+    publisher = _Publisher(fail_card_send=True)
+    service = EditSessionService(
+        publisher,
+        settings_repo=settings_repo,
+        draft_repo=draft_repo,
+        edit_repo=edit_repo,
+    )
+    session = _Session()
+
+    with pytest.raises(RuntimeError, match="card send failed"):
+        await service.apply_edit(
+            session,
+            EditPayload(
+                chat_id=-1001,
+                topic_id=12,
+                user_id=10,
+                message_id=800,
+                text="Новый текст",
+                photo_file_id=None,
+                photo_unique_id=None,
+            ),
+        )
+
+    assert draft.post_message_id is None
+    assert draft.card_message_id is None
+    assert 1000 in publisher.deleted_message_ids
+    assert active_session.status == EditSessionStatus.ACTIVE
