@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from telegram_publisher.exceptions import PublisherEditNotAllowed
+from tg_news_bot.ports.publisher import PublisherEditNotAllowed
 from tg_news_bot.db.models import BotSettings, Draft, DraftState
 from tg_news_bot.services.workflow import DraftWorkflowService
 from tg_news_bot.services.workflow_types import DraftAction, TransitionRequest

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from telegram_publisher.exceptions import PublisherNotFound
+from tg_news_bot.ports.publisher import PublisherNotFound
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 from tg_news_bot.telegram.handlers.editing import EditContext, create_edit_router
 

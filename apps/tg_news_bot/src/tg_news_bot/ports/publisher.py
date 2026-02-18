@@ -7,6 +7,22 @@ from typing import Protocol
 from telegram_publisher.types import PostContent, SendResult
 
 
+class PublisherError(Exception):
+    """Base publisher error used by tg-news-bot."""
+
+
+class PublisherEditNotAllowed(PublisherError):
+    """Raised when Telegram does not allow edit/delete operation."""
+
+
+class PublisherNotFound(PublisherError):
+    """Raised when a target message is not found."""
+
+
+class PublisherNotModified(PublisherError):
+    """Raised when edit operation has no actual changes."""
+
+
 class PublisherPort(Protocol):
     async def send_post(
         self,

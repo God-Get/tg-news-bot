@@ -4,8 +4,10 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from telegram_publisher.exceptions import PublisherNotFound as UpstreamPublisherNotFound
 from telegram_publisher.types import PostContent, SendResult
 from tg_news_bot.adapters.publisher import PublisherAdapter
+from tg_news_bot.ports.publisher import PublisherNotFound
 
 
 @dataclass
@@ -35,6 +37,11 @@ class _PublisherSpy:
 
     async def delete_message(self, **kwargs):  # noqa: ANN003
         self.calls.append(("delete_message", kwargs))
+
+
+class _DeleteNotFoundPublisher:
+    async def delete_message(self, **kwargs):  # noqa: ANN003, ARG002
+        raise UpstreamPublisherNotFound("not found")
 
 
 @pytest.mark.asyncio
@@ -96,3 +103,11 @@ async def test_publisher_adapter_delegates_send_and_edit_calls() -> None:
         "edit_reply_markup",
         "delete_message",
     ]
+
+
+@pytest.mark.asyncio
+async def test_publisher_adapter_maps_upstream_not_found() -> None:
+    adapter = PublisherAdapter(_DeleteNotFoundPublisher())  # type: ignore[arg-type]
+
+    with pytest.raises(PublisherNotFound):
+        await adapter.delete_message(chat_id=-1001, message_id=7)

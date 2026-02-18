@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from telegram_publisher.exceptions import PublisherEditNotAllowed
+from tg_news_bot.ports.publisher import PublisherEditNotAllowed
 from tg_news_bot.services.edit_sessions import EditSessionService
 
 

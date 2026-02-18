@@ -10,8 +10,7 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_news_bot.config import Settings
-from tg_news_bot.ports.publisher import PublisherPort
-from telegram_publisher.exceptions import PublisherNotFound
+from tg_news_bot.ports.publisher import PublisherNotFound, PublisherPort
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 from tg_news_bot.services.edit_sessions import EditPayload, EditSessionService
 

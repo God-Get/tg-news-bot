@@ -8,9 +8,8 @@ from aiogram import Router
 from aiogram.types import Message
 
 from tg_news_bot.config import Settings
-from tg_news_bot.ports.publisher import PublisherPort
+from tg_news_bot.ports.publisher import PublisherNotFound, PublisherPort
 from tg_news_bot.services.schedule_input import ScheduleInputService
-from telegram_publisher.exceptions import PublisherNotFound
 
 
 @dataclass(slots=True)

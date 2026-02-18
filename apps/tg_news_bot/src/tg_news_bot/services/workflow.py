@@ -6,10 +6,11 @@ from datetime import date, datetime, timezone
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
-from telegram_publisher.exceptions import (
+from tg_news_bot.ports.publisher import (
     PublisherEditNotAllowed,
     PublisherNotFound,
     PublisherNotModified,
+    PublisherPort,
 )
 from tg_news_bot.config import PostFormattingSettings
 from tg_news_bot.db.models import (
@@ -20,7 +21,6 @@ from tg_news_bot.db.models import (
     PublishFailureContext,
     ScheduledPostStatus,
 )
-from tg_news_bot.ports.publisher import PublisherPort
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 from tg_news_bot.repositories.drafts import DraftRepository
 from tg_news_bot.repositories.publish_failures import PublishFailureRepository
