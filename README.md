@@ -10,9 +10,13 @@ This repo contains:
 Text generation:
 - `TEXT_GENERATION__SUMMARY_MAX_CHARS=900`
 - `TEXT_GENERATION__KEEP_LANG_PREFIX=false`
+- `TEXT_GENERATION__DEFER_TO_EDITING=true`
+- `TEXT_GENERATION__TRANSLATION_STYLE=journalistic` (`journalistic|neutral|concise`)
+- `TEXT_GENERATION__TRANSLATION_REFINE_PASS=true`
+- `TEXT_GENERATION__TRANSLATION_GLOSSARY={"OpenAI":"OpenAI","inference":"инференс"}`
 
 LLM provider (OpenAI-compatible API):
-- `LLM__ENABLED=false`
+- `LLM__ENABLED=true`
 - `LLM__PROVIDER=openai_compat`
 - `LLM__API_KEY=<your_api_key>`
 - `LLM__BASE_URL=https://api.openai.com/v1`
@@ -23,6 +27,10 @@ LLM provider (OpenAI-compatible API):
 - `LLM__RETRY_BACKOFF_SECONDS=1`
 - `LLM__CIRCUIT_BREAKER_THRESHOLD=5`
 - `LLM__CIRCUIT_BREAKER_COOLDOWN_SECONDS=120`
+
+Notes:
+- For high-quality RU translation, keep LLM enabled.
+- Translator uses fact anchors + optional glossary + RU refine pass.
 
 Scheduler hardening:
 - `SCHEDULER__MAX_PUBLISH_ATTEMPTS=3`
@@ -75,3 +83,8 @@ Schedule UX:
 - contains `title + body + hashtags`
 - has source as inline button (`Источник`)
 - does not contain raw source URL in text (when `POST_FORMATTING__SOURCE_MODE=button`).
+
+## Roadmap
+
+- Current implementation backlog is tracked in `docs/ROADMAP.md`.
+- Multi-admin roles are intentionally deferred until single-admin MVP hardening is complete.

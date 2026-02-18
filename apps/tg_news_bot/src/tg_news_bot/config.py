@@ -81,6 +81,19 @@ class TextGenerationSettings(BaseModel):
     summary_max_chars: int = Field(900, ge=200, le=3000)
     keep_lang_prefix: bool = False
     defer_to_editing: bool = False
+    translation_style: str = "journalistic"
+    translation_refine_pass: bool = True
+    translation_glossary: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("translation_style")
+    @classmethod
+    def validate_translation_style(cls, value: str) -> str:
+        style = value.strip().lower()
+        if style not in {"journalistic", "neutral", "concise"}:
+            raise ValueError(
+                "translation_style must be one of: journalistic, neutral, concise"
+            )
+        return style
 
 
 class PostFormattingSettings(BaseModel):

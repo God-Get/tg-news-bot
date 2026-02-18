@@ -30,6 +30,20 @@ class _FakeClient:
         return self.response
 
 
+@dataclass
+class _FakeSequenceClient:
+    responses: list[str]
+    system_prompts: list[str] = field(default_factory=list)
+    user_prompts: list[str] = field(default_factory=list)
+
+    async def complete(self, *, system_prompt: str, user_prompt: str) -> str:
+        self.system_prompts.append(system_prompt)
+        self.user_prompts.append(user_prompt)
+        if not self.responses:
+            return ""
+        return self.responses.pop(0)
+
+
 class _SequenceClient(OpenAICompatClient):
     def __init__(self, sequence: list[object], **kwargs) -> None:
         super().__init__(**kwargs)
@@ -159,14 +173,41 @@ async def test_llm_translator_adds_fact_anchors_to_prompt() -> None:
     )
     await translator.translate(source, target_lang="RU")
 
-    assert len(fake.user_prompts) == 1
-    prompt = fake.user_prompts[0]
-    assert "Target language: RU" in prompt
-    assert "NASA" in prompt
-    assert "Artemis II" in prompt
-    assert "2026-05-21" in prompt
-    assert "GPT-5" in prompt
-    assert "https://example.com/mission" in prompt
+    assert len(fake.user_prompts) == 2
+    first_prompt = fake.user_prompts[0]
+    assert "Target language: RU" in first_prompt
+    assert "NASA" in first_prompt
+    assert "Artemis II" in first_prompt
+    assert "2026-05-21" in first_prompt
+    assert "GPT-5" in first_prompt
+    assert "https://example.com/mission" in first_prompt
+    second_prompt = fake.user_prompts[1]
+    assert "Current translation" in second_prompt
+
+
+@pytest.mark.asyncio
+async def test_llm_translator_uses_glossary_and_refine_pass() -> None:
+    fake = _FakeSequenceClient(responses=["черновой перевод", "отредактированный перевод"])
+    translator = LLMTranslator(
+        client=fake,
+        keep_lang_prefix=False,
+        style="journalistic",
+        refine_pass=True,
+        glossary={"OpenAI": "OpenAI", "inference": "инференс"},
+    )
+
+    result = await translator.translate(
+        "OpenAI inference quality improved",
+        target_lang="RU",
+    )
+
+    assert result == "отредактированный перевод"
+    assert len(fake.user_prompts) == 2
+    assert "Required glossary:" in fake.user_prompts[0]
+    assert "- OpenAI -> OpenAI" in fake.user_prompts[0]
+    assert "- inference -> инференс" in fake.user_prompts[0]
+    assert "Current translation:" in fake.user_prompts[1]
+    assert "черновой перевод" in fake.user_prompts[1]
 
 
 @pytest.mark.asyncio
@@ -226,9 +267,18 @@ def test_build_text_pipeline_uses_stub_when_llm_disabled() -> None:
 
 def test_build_text_pipeline_uses_llm_when_configured() -> None:
     pipeline = build_text_pipeline(
-        TextGenerationSettings(summary_max_chars=700, keep_lang_prefix=False),
+        TextGenerationSettings(
+            summary_max_chars=700,
+            keep_lang_prefix=False,
+            translation_style="concise",
+            translation_refine_pass=True,
+            translation_glossary={"GPU": "GPU"},
+        ),
         LLMSettings(enabled=True, api_key="test-key", model="test-model"),
     )
 
     assert isinstance(pipeline.summarizer, LLMSummarizer)
     assert isinstance(pipeline.translator, LLMTranslator)
+    assert pipeline.translator.style == "concise"
+    assert pipeline.translator.refine_pass is True
+    assert pipeline.translator.glossary == {"GPU": "GPU"}

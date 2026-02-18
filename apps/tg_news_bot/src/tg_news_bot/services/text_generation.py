@@ -21,6 +21,15 @@ _TOPIC_GUIDANCE = {
     "energy": "Focus on technology, efficiency, costs, scale, and deployment stage.",
 }
 
+_TRANSLATION_STYLE_GUIDANCE = {
+    "journalistic": (
+        "Use clear, natural Russian suitable for a science/tech news channel. "
+        "Keep tone professional and readable."
+    ),
+    "neutral": "Use neutral, plain Russian without stylistic coloring.",
+    "concise": "Use concise Russian and remove verbosity while preserving facts.",
+}
+
 
 class Summarizer(Protocol):
     async def summarize(
@@ -233,31 +242,66 @@ class LLMSummarizer:
 class LLMTranslator:
     client: LLMClient
     keep_lang_prefix: bool = False
+    style: str = "journalistic"
+    refine_pass: bool = True
+    glossary: dict[str, str] = field(default_factory=dict)
 
     async def translate(self, text: str, *, target_lang: str) -> str:
         compact = _compact_text(text)
         if not compact:
             return ""
 
-        system_prompt = (
-            "Translate the text accurately. "
-            "Preserve facts: links, numbers, dates, abbreviations and proper names. "
-            "Do not invent or omit factual details. "
-            "Return plain text only."
+        normalized_style = self.style.strip().lower() or "journalistic"
+        style_guidance = _TRANSLATION_STYLE_GUIDANCE.get(
+            normalized_style,
+            _TRANSLATION_STYLE_GUIDANCE["journalistic"],
         )
         anchors = _extract_fact_anchors(compact)
-        anchors_block = ""
-        if anchors:
-            anchors_lines = "\n".join(f"- {item}" for item in anchors)
-            anchors_block = (
-                "Keep these anchors unchanged when they appear in the source text:\n"
-                f"{anchors_lines}\n\n"
-            )
+        glossary = _normalize_glossary(self.glossary)
+        system_prompt = (
+            "You are a professional translator for science and technology news. "
+            "Translate the source text accurately. "
+            "Do not invent or omit facts. "
+            "Preserve numbers, dates, links, abbreviations, product names and organizations. "
+            f"{style_guidance} "
+            "Return plain text only."
+        )
         result = await self.client.complete(
             system_prompt=system_prompt,
-            user_prompt=f"Target language: {target_lang}\n\n{anchors_block}{compact}",
+            user_prompt=_build_translation_user_prompt(
+                source_text=compact,
+                target_lang=target_lang,
+                anchors=anchors,
+                glossary=glossary,
+            ),
         )
         translated = _compact_text(result) or compact
+
+        if self.refine_pass and target_lang.upper() == "RU":
+            refine_system_prompt = (
+                "You are a senior Russian editor. "
+                "Improve fluency and readability of the translated text. "
+                "Keep all factual details intact. "
+                "Do not add or remove facts. "
+                f"{style_guidance} "
+                "Return plain text only."
+            )
+            try:
+                refined = await self.client.complete(
+                    system_prompt=refine_system_prompt,
+                    user_prompt=_build_refine_user_prompt(
+                        translated_text=translated,
+                        anchors=anchors,
+                        glossary=glossary,
+                    ),
+                )
+                refined_compact = _compact_text(refined)
+                if refined_compact:
+                    translated = refined_compact
+            except Exception:
+                log = get_logger(__name__)
+                log.warning("text_generation.translation_refine_failed")
+
         if self.keep_lang_prefix:
             return f"[{target_lang}] {translated}"
         return translated
@@ -350,6 +394,9 @@ def build_text_pipeline(
                 translator=LLMTranslator(
                     client=client,
                     keep_lang_prefix=text_settings.keep_lang_prefix,
+                    style=text_settings.translation_style,
+                    refine_pass=text_settings.translation_refine_pass,
+                    glossary=text_settings.translation_glossary,
                 ),
             )
 
@@ -460,3 +507,57 @@ def _extract_fact_anchors(text: str, *, max_items: int = 16) -> list[str]:
         if len(anchors) >= max_items:
             break
     return anchors
+
+
+def _normalize_glossary(glossary: dict[str, str], *, limit: int = 32) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    for source_term, translated_term in glossary.items():
+        source = _compact_text(source_term)
+        translated = _compact_text(translated_term)
+        if not source or not translated:
+            continue
+        items.append((source, translated))
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _build_translation_user_prompt(
+    *,
+    source_text: str,
+    target_lang: str,
+    anchors: list[str],
+    glossary: list[tuple[str, str]],
+) -> str:
+    blocks: list[str] = [f"Target language: {target_lang}"]
+    if glossary:
+        glossary_lines = "\n".join(f"- {source} -> {translated}" for source, translated in glossary)
+        blocks.append(f"Required glossary:\n{glossary_lines}")
+    if anchors:
+        anchors_lines = "\n".join(f"- {item}" for item in anchors)
+        blocks.append(
+            "Keep these anchors unchanged when they appear in the source text:\n"
+            f"{anchors_lines}"
+        )
+    blocks.append(f"Source text:\n{source_text}")
+    return "\n\n".join(blocks)
+
+
+def _build_refine_user_prompt(
+    *,
+    translated_text: str,
+    anchors: list[str],
+    glossary: list[tuple[str, str]],
+) -> str:
+    blocks: list[str] = []
+    if glossary:
+        glossary_lines = "\n".join(f"- {source} -> {translated}" for source, translated in glossary)
+        blocks.append(f"Required glossary:\n{glossary_lines}")
+    if anchors:
+        anchors_lines = "\n".join(f"- {item}" for item in anchors)
+        blocks.append(
+            "Keep these anchors unchanged where they are present:\n"
+            f"{anchors_lines}"
+        )
+    blocks.append(f"Current translation:\n{translated_text}")
+    return "\n\n".join(blocks)

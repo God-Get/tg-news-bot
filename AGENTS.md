@@ -54,6 +54,11 @@
 
 ## 8. Ближайший бэклог
 - Команды управления failed scheduled-публикациями (list/retry/cancel).
+- Trust score источников и доменов для скоринга.
+- Семантический dedup (near-duplicates по embedding).
+- Метрики и дашборды воронки ingestion -> publish.
+- Авто-теги/рубрикатор и content safety перед READY.
 - Runbook восстановления и backup/restore Postgres.
 - Улучшенный image filtering (анти-логотип, качество).
 - Модуль тренд-аналитики и рекомендаций источников.
+- Multi-admin роли и ACL: отложено, пока не завершены пункты выше.
