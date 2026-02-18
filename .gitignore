@@ -16,7 +16,12 @@ __pycache__/
 
 # Logs
 *.log
+bot.stdout.log
+bot.stderr.log
 
 # IDE
 .vscode/
 .idea/
+
+# Local tooling
+.mirrord/

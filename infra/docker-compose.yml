@@ -17,12 +17,11 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile
+    env_file:
+      - ../.env
     environment:
       DATABASE_URL: postgresql+asyncpg://tg_news_bot:tg_news_bot@postgres:5432/tg_news_bot
-      BOT_TOKEN: ${BOT_TOKEN}
-      ADMIN_USER_ID: ${ADMIN_USER_ID}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      SENTRY_DSN: ${SENTRY_DSN}
       RSS__POLL_INTERVAL_SECONDS: ${RSS__POLL_INTERVAL_SECONDS:-900}
       RSS__MAX_ITEMS_PER_SOURCE: ${RSS__MAX_ITEMS_PER_SOURCE:-50}
       RSS__PER_SOURCE_MIN_INTERVAL_SECONDS: ${RSS__PER_SOURCE_MIN_INTERVAL_SECONDS:-0}
