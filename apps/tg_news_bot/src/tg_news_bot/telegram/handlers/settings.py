@@ -559,12 +559,15 @@ def create_settings_router(context: SettingsContext) -> Router:
         discovered: list[str] = []
         for handler in router.message.handlers:
             for filter_obj in handler.filters:
-                command_filter = getattr(filter_obj, "callback", None)
+                command_filter = getattr(filter_obj, "callback", filter_obj)
                 names = getattr(command_filter, "commands", None)
+                if not names:
+                    names = getattr(filter_obj, "commands", None)
                 if not names:
                     continue
                 for name in names:
-                    command_name = str(name).strip().lstrip("/").lower()
+                    command_value = getattr(name, "command", name)
+                    command_name = str(command_value).strip().lstrip("/").lower()
                     if command_name and command_name not in discovered:
                         discovered.append(command_name)
         return discovered
@@ -589,7 +592,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             return lines
 
         discovered = _discover_router_commands()
-        for extra in ("cancel",):
+        for extra in (*command_meta.keys(), "cancel"):
             if extra not in discovered:
                 discovered.append(extra)
 
