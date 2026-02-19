@@ -47,117 +47,173 @@ class SettingsContext:
 def create_settings_router(context: SettingsContext) -> Router:
     router = Router()
     command_meta = {
-        "commands": {"syntax": "/commands", "description": "показать эту справку"},
-        "status": {"syntax": "/status", "description": "показать текущие настройки"},
-        "set_group": {"syntax": "/set_group", "description": "сохранить group_chat_id"},
+        "commands": {
+            "syntax": "/commands",
+            "description": "Показывает полный список команд с назначением и синтаксисом.",
+            "where": "Любой топик рабочей группы.",
+        },
+        "status": {
+            "syntax": "/status",
+            "description": "Показывает текущую конфигурацию бота, топиков и канал публикации.",
+            "where": "Обычно #General.",
+        },
+        "set_group": {
+            "syntax": "/set_group",
+            "description": "Сохраняет ID текущей супергруппы как рабочую группу бота.",
+            "where": "Внутри нужной рабочей супергруппы.",
+        },
         "set_inbox_topic": {
             "syntax": "/set_inbox_topic",
-            "description": "сохранить INBOX topic_id",
+            "description": "Назначает текущий топик как INBOX (входящие черновики).",
+            "where": "Запускать внутри INBOX topic.",
         },
         "set_service_topic": {
             "syntax": "/set_service_topic",
-            "description": "сохранить EDITING topic_id",
+            "description": "Назначает текущий топик как EDITING (редактирование).",
+            "where": "Запускать внутри EDITING topic.",
         },
         "set_ready_topic": {
             "syntax": "/set_ready_topic",
-            "description": "сохранить READY topic_id",
+            "description": "Назначает текущий топик как READY (готово к публикации).",
+            "where": "Запускать внутри READY topic.",
         },
         "set_scheduled_topic": {
             "syntax": "/set_scheduled_topic",
-            "description": "сохранить SCHEDULED topic_id",
+            "description": "Назначает текущий топик как SCHEDULED (отложенные).",
+            "where": "Запускать внутри SCHEDULED topic.",
         },
         "set_published_topic": {
             "syntax": "/set_published_topic",
-            "description": "сохранить PUBLISHED topic_id",
+            "description": "Назначает текущий топик как PUBLISHED (опубликованные).",
+            "where": "Запускать внутри PUBLISHED topic.",
         },
         "set_archive_topic": {
             "syntax": "/set_archive_topic",
-            "description": "сохранить ARCHIVE topic_id",
+            "description": "Назначает текущий топик как ARCHIVE (архив).",
+            "where": "Запускать внутри ARCHIVE topic.",
         },
         "set_channel": {
             "syntax": "/set_channel <channel_id>",
-            "description": "сохранить канал публикации",
+            "description": "Сохраняет канал, куда отправляются публикации.",
+            "where": "Обычно #General.",
+            "example": "/set_channel -1001234567890",
         },
         "add_source": {
             "syntax": "/add_source <rss_url> [name]",
-            "description": "добавить/обновить RSS-источник",
+            "description": "Добавляет новый RSS-источник или обновляет существующий.",
+            "where": "Обычно #General.",
+            "example": "/add_source https://example.com/rss Tech News",
         },
         "list_sources": {
             "syntax": "/list_sources",
-            "description": "показать список источников",
+            "description": "Выводит список источников: статус, trust score, topics, SSL-флаги.",
+            "where": "Обычно #General.",
         },
         "set_source_topics": {
             "syntax": "/set_source_topics <source_id> <topics>",
-            "description": "задать topic hints источнику",
+            "description": "Задает topic hints для конкретного источника (через запятую).",
+            "where": "Обычно #General.",
+            "example": "/set_source_topics 3 ai,space,science",
         },
         "clear_source_topics": {
             "syntax": "/clear_source_topics <source_id>",
-            "description": "очистить topic hints источника",
+            "description": "Очищает topic hints у указанного источника.",
+            "where": "Обычно #General.",
+            "example": "/clear_source_topics 3",
         },
         "set_source_ssl_insecure": {
             "syntax": "/set_source_ssl_insecure <source_id> <on|off>",
-            "description": "включить/выключить insecure SSL fallback",
+            "description": "Включает/выключает insecure SSL fallback для источника.",
+            "where": "Обычно #General.",
+            "example": "/set_source_ssl_insecure 3 on",
         },
         "enable_source": {
             "syntax": "/enable_source <source_id>",
-            "description": "включить источник",
+            "description": "Включает источник для регулярного RSS-поллинга.",
+            "where": "Обычно #General.",
+            "example": "/enable_source 3",
         },
         "disable_source": {
             "syntax": "/disable_source <source_id>",
-            "description": "выключить источник",
+            "description": "Отключает источник от RSS-поллинга.",
+            "where": "Обычно #General.",
+            "example": "/disable_source 3",
         },
         "remove_source": {
             "syntax": "/remove_source <source_id>",
-            "description": "удалить источник (или выключить при linked data)",
+            "description": "Удаляет источник; если есть связанные данные, источник будет выключен.",
+            "where": "Обычно #General.",
+            "example": "/remove_source 3",
         },
         "source_quality": {
             "syntax": "/source_quality [source_id]",
-            "description": "показать trust score источников",
+            "description": "Показывает trust score источников или подробности по одному source_id.",
+            "where": "Обычно #General.",
+            "example": "/source_quality 3",
         },
         "ingest_now": {
             "syntax": "/ingest_now",
-            "description": "принудительный запуск RSS ingestion",
+            "description": "Немедленно запускает ingestion по всем включенным источникам.",
+            "where": "Обычно #General.",
         },
         "ingest_source": {
             "syntax": "/ingest_source <source_id>",
-            "description": "ingestion только одного источника",
+            "description": "Запускает ingestion только для одного источника.",
+            "where": "Обычно #General.",
+            "example": "/ingest_source 3",
         },
         "ingest_url": {
             "syntax": "/ingest_url <article_url> [source_id]",
-            "description": "добавить статью по ссылке во Входящие",
+            "description": "Ручной импорт одной статьи во Входящие с полной обработкой.",
+            "where": "Обычно #General.",
+            "example": "/ingest_url https://example.com/article 3",
         },
         "process_range": {
             "syntax": "/process_range <from_id> <to_id>",
-            "description": "пакетная выжимка/перевод для диапазона Draft ID",
+            "description": "Пакетно запускает выжимку и перевод для диапазона Draft ID.",
+            "where": "Обычно #General.",
+            "example": "/process_range 120 140",
         },
         "scheduled_failed_list": {
             "syntax": "/scheduled_failed_list [limit]",
-            "description": "список failed scheduled задач",
+            "description": "Показывает список failed scheduled-задач публикации.",
+            "where": "Обычно #General.",
+            "example": "/scheduled_failed_list 20",
         },
         "scheduled_retry": {
             "syntax": "/scheduled_retry <draft_id>",
-            "description": "повторить failed scheduled задачу",
+            "description": "Ставит failed scheduled-задачу на немедленный повтор.",
+            "where": "Обычно #General.",
+            "example": "/scheduled_retry 132",
         },
         "scheduled_cancel": {
             "syntax": "/scheduled_cancel <draft_id>",
-            "description": "отменить scheduled задачу и вернуть в READY",
+            "description": "Отменяет scheduled-задачу и возвращает draft в READY.",
+            "where": "Обычно #General.",
+            "example": "/scheduled_cancel 132",
         },
         "collect_trends": {
             "syntax": "/collect_trends",
-            "description": "собрать сигналы трендов (arXiv/HN/X/Reddit)",
+            "description": "Принудительно собирает trend-сигналы (arXiv/HN/X/Reddit).",
+            "where": "Обычно #General.",
         },
         "trends": {
             "syntax": "/trends [hours] [limit]",
-            "description": "показать последние trend signals",
+            "description": "Показывает последние trend-сигналы из БД.",
+            "where": "Обычно #General.",
+            "example": "/trends 24 30",
         },
         "analytics": {
             "syntax": "/analytics [hours]",
-            "description": "операционная панель метрик",
+            "description": "Показывает сводную операционную аналитику по пайплайну.",
+            "where": "Обычно #General.",
+            "example": "/analytics 24",
         },
         # editing router command
         "cancel": {
             "syntax": "/cancel",
-            "description": "отменить активную edit-сессию в EDITING topic",
+            "description": "Отменяет активную edit-сессию для текущего draft.",
+            "where": "Внутри EDITING topic.",
         },
     }
     command_sections = {
@@ -286,7 +342,25 @@ def create_settings_router(context: SettingsContext) -> Router:
                         discovered.append(command_name)
         return discovered
 
-    def render_commands_help() -> str:
+    def render_commands_help_pages() -> list[str]:
+        page_limit = 3500
+
+        def render_command_lines(name: str) -> list[str]:
+            meta = command_meta.get(name, {})
+            syntax = str(meta.get("syntax", f"/{name}"))
+            description = str(meta.get("description", "Описание команды не указано."))
+            where = str(meta.get("where", "Любой топик рабочей группы."))
+            lines = [
+                f"• {syntax}",
+                f"  Синтаксис: {syntax}",
+                f"  Что делает: {description}",
+                f"  Где запускать: {where}",
+            ]
+            example = meta.get("example")
+            if example:
+                lines.append(f"  Пример: {example}")
+            return lines
+
         discovered = _discover_router_commands()
         for extra in ("cancel",):
             if extra not in discovered:
@@ -295,43 +369,52 @@ def create_settings_router(context: SettingsContext) -> Router:
         ordered = [item for item in preferred_order if item in discovered]
         ordered.extend(sorted(item for item in discovered if item not in ordered))
 
-        lines = ["Доступные команды (admin):", ""]
+        blocks: list[str] = []
         for section_title, section_items in command_sections.items():
             rows = [item for item in ordered if item in section_items]
             if not rows:
                 continue
-            lines.append(f"{section_title}:")
+            section_lines = [f"{section_title}:"]
             for name in rows:
-                meta = command_meta.get(name, {})
-                syntax = meta.get("syntax", f"/{name}")
-                description = meta.get("description")
-                if description:
-                    lines.append(f"{syntax} - {description}")
-                else:
-                    lines.append(syntax)
-            lines.append("")
+                section_lines.extend(render_command_lines(name))
+                section_lines.append("")
+            blocks.append("\n".join(section_lines).rstrip())
 
         other = [item for item in ordered if not any(item in group for group in command_sections.values())]
         if other:
-            lines.append("Прочее:")
+            section_lines = ["Прочее:"]
             for name in other:
-                meta = command_meta.get(name, {})
-                syntax = meta.get("syntax", f"/{name}")
-                description = meta.get("description")
-                if description:
-                    lines.append(f"{syntax} - {description}")
-                else:
-                    lines.append(syntax)
-            lines.append("")
+                section_lines.extend(render_command_lines(name))
+                section_lines.append("")
+            blocks.append("\n".join(section_lines).rstrip())
 
-        lines.extend(
-            [
-                "Подсказка:",
-                "Команды /set_*_topic запускайте внутри нужного топика.",
-                "Остальные можно запускать в #General.",
-            ]
+        blocks.append(
+            "\n".join(
+                [
+                    "Подсказки:",
+                    "1) Команды /set_*_topic запускайте внутри нужного топика.",
+                    "2) Операционные команды обычно запускаются в #General.",
+                    "3) Параметры в <угловых> скобках обязательны, в [квадратных] опциональны.",
+                ]
+            )
         )
-        return "\n".join(lines)
+
+        pages: list[str] = []
+        current = (
+            "Справка команд (admin):\n"
+            "У каждой команды указан правильный синтаксис и назначение."
+        )
+        for block in blocks:
+            separator = "\n\n"
+            candidate = f"{current}{separator}{block}".strip()
+            if len(candidate) <= page_limit:
+                current = candidate
+                continue
+            pages.append(current)
+            current = f"Справка команд (admin), продолжение:\n\n{block}"
+        if current:
+            pages.append(current)
+        return pages
 
     def render_ingestion_stats(stats: IngestionStats) -> str:
         lines = [
@@ -605,11 +688,12 @@ def create_settings_router(context: SettingsContext) -> Router:
     async def commands_help(message: Message) -> None:
         if not is_admin(message):
             return
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text=render_commands_help(),
-        )
+        for page in render_commands_help_pages():
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=page,
+            )
 
     @router.message(Command("add_source"))
     async def add_source(message: Message, command: CommandObject) -> None:

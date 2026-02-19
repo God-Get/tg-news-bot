@@ -99,14 +99,16 @@ async def test_commands_help_contains_syntax_lines() -> None:
 
     await handler(_Message())
 
-    assert len(publisher.sent) == 1
-    text = publisher.sent[0]["text"]
+    assert publisher.sent
+    text = "\n".join(item["text"] for item in publisher.sent)
     assert "/commands" in text
     assert "/ingest_url <article_url> [source_id]" in text
     assert "/process_range <from_id> <to_id>" in text
     assert "/scheduled_failed_list [limit]" in text
     assert "/analytics [hours]" in text
     assert "/cancel" in text
+    assert "Синтаксис:" in text
+    assert "Что делает:" in text
 
 
 @pytest.mark.asyncio
@@ -121,7 +123,8 @@ async def test_commands_help_lists_all_router_commands() -> None:
 
     await handler(_Message())
 
-    text = publisher.sent[0]["text"]
+    assert publisher.sent
+    text = "\n".join(item["text"] for item in publisher.sent)
     command_names: set[str] = set()
     for handler_obj in router.message.handlers:
         for filter_obj in handler_obj.filters:
