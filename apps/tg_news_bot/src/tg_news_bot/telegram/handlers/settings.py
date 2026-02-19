@@ -631,8 +631,8 @@ def create_settings_router(context: SettingsContext) -> Router:
 
         pages: list[str] = []
         current = (
-            "Справка команд (admin):\n"
-            "У каждой команды указан правильный синтаксис и назначение."
+            "У каждой команды указан правильный синтаксис и назначение.\n"
+            "Справка может приходить несколькими сообщениями."
         )
         for block in blocks:
             separator = "\n\n"
@@ -641,10 +641,19 @@ def create_settings_router(context: SettingsContext) -> Router:
                 current = candidate
                 continue
             pages.append(current)
-            current = f"Справка команд (admin), продолжение:\n\n{block}"
+            current = block
         if current:
             pages.append(current)
-        return pages
+
+        total = max(len(pages), 1)
+        formatted_pages: list[str] = []
+        for idx, page in enumerate(pages, start=1):
+            if idx == 1:
+                header = f"Справка команд (admin, {idx}/{total}):"
+            else:
+                header = f"Справка команд (продолжение, {idx}/{total}):"
+            formatted_pages.append(f"{header}\n{page}")
+        return formatted_pages
 
     def render_ingestion_stats(stats: IngestionStats) -> str:
         lines = [
