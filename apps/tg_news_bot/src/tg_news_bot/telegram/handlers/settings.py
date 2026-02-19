@@ -19,8 +19,13 @@ from tg_news_bot.ports.publisher import PublisherPort
 from tg_news_bot.repositories.drafts import DraftRepository
 from tg_news_bot.repositories.scheduled_posts import ScheduledPostRepository
 from tg_news_bot.repositories.sources import SourceRepository
+from tg_news_bot.repositories.trend_topic_profiles import (
+    TrendTopicProfileInput,
+    TrendTopicProfileRepository,
+)
 from tg_news_bot.services.analytics import AnalyticsService
 from tg_news_bot.services.ingestion import IngestionRunner, IngestionStats
+from tg_news_bot.services.trend_discovery import TrendDiscoveryService
 from tg_news_bot.services.trends import TrendCollector
 from tg_news_bot.services.workflow import DraftWorkflowService
 from tg_news_bot.services.workflow_types import DraftAction, TransitionRequest
@@ -39,6 +44,7 @@ class SettingsContext:
     ingestion_runner: IngestionRunner | None = None
     workflow: DraftWorkflowService | None = None
     trend_collector: TrendCollector | None = None
+    trend_discovery: TrendDiscoveryService | None = None
     scheduled_repo: ScheduledPostRepository | None = None
     draft_repo: DraftRepository | None = None
     analytics: AnalyticsService | None = None
@@ -92,11 +98,22 @@ def create_settings_router(context: SettingsContext) -> Router:
             "description": "Назначает текущий топик как ARCHIVE (архив).",
             "where": "Запускать внутри ARCHIVE topic.",
         },
+        "set_trend_topic": {
+            "syntax": "/set_trend_topic",
+            "description": "Назначает текущий топик как TREND_CANDIDATES (модерация трендов).",
+            "where": "Запускать внутри topic для тренд-кандидатов.",
+        },
         "set_channel": {
             "syntax": "/set_channel <channel_id>",
             "description": "Сохраняет канал, куда отправляются публикации.",
             "where": "Обычно #General.",
             "example": "/set_channel -1001234567890",
+        },
+        "set_hashtag_mode": {
+            "syntax": "/set_hashtag_mode <ru|en|both>",
+            "description": "Переключает режим хэштегов в постах: только RU, только EN или оба.",
+            "where": "Обычно #General.",
+            "example": "/set_hashtag_mode ru",
         },
         "add_source": {
             "syntax": "/add_source <rss_url> [name]",
@@ -203,6 +220,66 @@ def create_settings_router(context: SettingsContext) -> Router:
             "where": "Обычно #General.",
             "example": "/trends 24 30",
         },
+        "trend_scan": {
+            "syntax": "/trend_scan [hours] [limit]",
+            "description": "Анализирует сеть по профилям тем, формирует topic/article/source кандидаты.",
+            "where": "Обычно #General.",
+            "example": "/trend_scan 24 6",
+        },
+        "trend_profile_add": {
+            "syntax": "/trend_profile_add <name>|<seed_csv>[|<exclude_csv>|<trusted_domains_csv>|<min_score>]",
+            "description": "Добавляет или обновляет профиль темы для trend scan.",
+            "where": "Обычно #General.",
+            "example": "/trend_profile_add Quantum|quantum,qubit,superconducting|casino,betting|nature.com,arxiv.org|1.4",
+        },
+        "trend_profile_list": {
+            "syntax": "/trend_profile_list [all]",
+            "description": "Показывает профили тем, по которым бот ищет тренды.",
+            "where": "Обычно #General.",
+            "example": "/trend_profile_list all",
+        },
+        "trend_profile_enable": {
+            "syntax": "/trend_profile_enable <profile_id>",
+            "description": "Включает профиль темы в trend scan.",
+            "where": "Обычно #General.",
+            "example": "/trend_profile_enable 7",
+        },
+        "trend_profile_disable": {
+            "syntax": "/trend_profile_disable <profile_id>",
+            "description": "Отключает профиль темы в trend scan.",
+            "where": "Обычно #General.",
+            "example": "/trend_profile_disable 7",
+        },
+        "trend_topics": {
+            "syntax": "/trend_topics [hours] [limit]",
+            "description": "Показывает найденные трендовые темы за окно времени.",
+            "where": "Обычно #General.",
+            "example": "/trend_topics 24 10",
+        },
+        "trend_articles": {
+            "syntax": "/trend_articles <topic_id> [limit]",
+            "description": "Показывает кандидаты статей по теме и их score.",
+            "where": "Обычно #General.",
+            "example": "/trend_articles 17 15",
+        },
+        "trend_sources": {
+            "syntax": "/trend_sources <topic_id> [limit]",
+            "description": "Показывает кандидаты источников по теме и их score.",
+            "where": "Обычно #General.",
+            "example": "/trend_sources 17 10",
+        },
+        "trend_ingest": {
+            "syntax": "/trend_ingest <candidate_id>",
+            "description": "Подтверждает статью-кандидат и отправляет её во Входящие.",
+            "where": "Обычно #General.",
+            "example": "/trend_ingest 144",
+        },
+        "trend_add_source": {
+            "syntax": "/trend_add_source <candidate_id>",
+            "description": "Подтверждает source-кандидат и добавляет источник (disabled).",
+            "where": "Обычно #General.",
+            "example": "/trend_add_source 42",
+        },
         "analytics": {
             "syntax": "/analytics [hours]",
             "description": "Показывает сводную операционную аналитику по пайплайну.",
@@ -226,7 +303,9 @@ def create_settings_router(context: SettingsContext) -> Router:
             "set_scheduled_topic",
             "set_published_topic",
             "set_archive_topic",
+            "set_trend_topic",
             "set_channel",
+            "set_hashtag_mode",
         },
         "Источники": {
             "add_source",
@@ -251,6 +330,16 @@ def create_settings_router(context: SettingsContext) -> Router:
             "scheduled_cancel",
             "collect_trends",
             "trends",
+            "trend_scan",
+            "trend_profile_add",
+            "trend_profile_list",
+            "trend_profile_enable",
+            "trend_profile_disable",
+            "trend_topics",
+            "trend_articles",
+            "trend_sources",
+            "trend_ingest",
+            "trend_add_source",
             "analytics",
         },
         "EDITING": {"cancel"},
@@ -259,6 +348,14 @@ def create_settings_router(context: SettingsContext) -> Router:
     scheduled_repo = context.scheduled_repo or ScheduledPostRepository()
     draft_repo = context.draft_repo or DraftRepository()
     analytics_service = context.analytics or AnalyticsService(context.session_factory)
+    trend_profiles_repo = TrendTopicProfileRepository()
+    trend_status_labels = {
+        "PENDING": "ожидает",
+        "APPROVED": "подтверждён",
+        "REJECTED": "отклонён",
+        "INGESTED": "добавлен во входящие",
+        "FAILED": "ошибка",
+    }
 
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and message.from_user.id == context.settings.admin_user_id)
@@ -284,6 +381,10 @@ def create_settings_router(context: SettingsContext) -> Router:
             if value and value not in unique:
                 unique.append(value)
         return unique
+
+    def parse_csv(raw: str) -> list[str]:
+        values = [item.strip().lower() for item in raw.split(",")]
+        return [value for value in values if value]
 
     def parse_id_range(raw: str) -> tuple[int, int] | None:
         parts = raw.strip().split()
@@ -327,6 +428,63 @@ def create_settings_router(context: SettingsContext) -> Router:
         if value <= 0:
             return None
         return value
+
+    def parse_non_negative_float(raw: str | None) -> float | None:
+        if raw is None:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        if value < 0:
+            return None
+        return value
+
+    def parse_trend_profile_args(raw: str | None) -> tuple[str, list[str], list[str], list[str], float | None] | None:
+        if raw is None:
+            return None
+        parts = [item.strip() for item in raw.split("|")]
+        if len(parts) < 2 or len(parts) > 5:
+            return None
+        name = parts[0]
+        seeds = parse_csv(parts[1])
+        if not name or not seeds:
+            return None
+        excludes = parse_csv(parts[2]) if len(parts) >= 3 else []
+        trusted_domains = parse_csv(parts[3]) if len(parts) >= 4 else []
+        min_score = parse_non_negative_float(parts[4]) if len(parts) >= 5 else None
+        if len(parts) >= 5 and min_score is None:
+            return None
+        return name, seeds, excludes, trusted_domains, min_score
+
+    def parse_hashtag_mode(raw: str | None) -> str | None:
+        if raw is None:
+            return None
+        mode = raw.strip().lower()
+        if mode not in {"ru", "en", "both"}:
+            return None
+        return mode
+
+    def parse_id_and_optional_limit(raw: str | None) -> tuple[int, int | None] | None:
+        if raw is None:
+            return None
+        parts = raw.strip().split()
+        if not parts:
+            return None
+        first = parse_positive_int(parts[0])
+        if first is None:
+            return None
+        if len(parts) == 1:
+            return first, None
+        if len(parts) == 2:
+            second = parse_positive_int(parts[1])
+            if second is None:
+                return None
+            return first, second
+        return None
 
     def _discover_router_commands() -> list[str]:
         discovered: list[str] = []
@@ -618,6 +776,30 @@ def create_settings_router(context: SettingsContext) -> Router:
             text=f"ARCHIVE топик сохранён: {topic_id}",
         )
 
+    @router.message(Command("set_trend_topic"))
+    async def set_trend_topic(message: Message) -> None:
+        if not is_admin(message):
+            return
+        topic_id = message.message_thread_id
+        if not topic_id:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Команду нужно вызывать внутри топика.",
+            )
+            return
+
+        def updater(bs: BotSettings) -> None:
+            bs.group_chat_id = message.chat.id
+            bs.trend_candidates_topic_id = topic_id
+
+        await update_settings(updater)
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"TREND_CANDIDATES топик сохранён: {topic_id}",
+        )
+
     @router.message(Command("set_channel"))
     async def set_channel(message: Message, command: CommandObject) -> None:
         if not is_admin(message):
@@ -649,6 +831,25 @@ def create_settings_router(context: SettingsContext) -> Router:
             text=f"Канал сохранён: {channel_id}",
         )
 
+    @router.message(Command("set_hashtag_mode"))
+    async def set_hashtag_mode(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        mode = parse_hashtag_mode(command.args if command else None)
+        if mode is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /set_hashtag_mode <ru|en|both>",
+            )
+            return
+        context.settings.post_formatting.hashtag_mode = mode
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"Режим хэштегов обновлён: {mode}",
+        )
+
     @router.message(Command("status"))
     async def status(message: Message) -> None:
         if not is_admin(message):
@@ -673,10 +874,13 @@ def create_settings_router(context: SettingsContext) -> Router:
             f"scheduled_topic_id: {bot_settings.scheduled_topic_id}",
             f"published_topic_id: {bot_settings.published_topic_id}",
             f"archive_topic_id: {bot_settings.archive_topic_id}",
+            f"trend_candidates_topic_id: {bot_settings.trend_candidates_topic_id}",
             f"channel_id: {bot_settings.channel_id}",
             f"sources_total: {sources_total}",
             f"sources_enabled: {enabled_total}",
             f"sources_avg_trust: {avg_trust:.2f}",
+            f"hashtags_mode: {context.settings.post_formatting.hashtag_mode}",
+            f"trend_discovery_mode: {context.settings.trend_discovery.mode}",
         ]
         await context.publisher.send_text(
             chat_id=message.chat.id,
@@ -1539,7 +1743,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Trend collector недоступен.",
+                text="Сборщик трендов недоступен.",
             )
             return
         await context.publisher.send_text(
@@ -1562,8 +1766,8 @@ def create_settings_router(context: SettingsContext) -> Router:
             topic_id=message.message_thread_id,
             text=(
                 f"Тренды обновлены.\n"
-                f"signals inserted: {stats.inserted}\n"
-                f"keywords total: {stats.keywords_total}"
+                f"добавлено сигналов: {stats.inserted}\n"
+                f"ключевых слов: {stats.keywords_total}"
             ),
         )
 
@@ -1575,7 +1779,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Trend collector недоступен.",
+                text="Сборщик трендов недоступен.",
             )
             return
         hours = 24
@@ -1595,10 +1799,10 @@ def create_settings_router(context: SettingsContext) -> Router:
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text=f"Нет trend signals за {hours}ч.",
+                text=f"Нет trend-сигналов за {hours}ч.",
             )
             return
-        lines = [f"Trends за {hours}ч (top {len(rows)}):"]
+        lines = [f"Тренд-сигналы за {hours}ч (топ {len(rows)}):"]
         for source_name, keyword, weight, observed_at in rows:
             lines.append(
                 f"{observed_at:%m-%d %H:%M} [{source_name}] {keyword} (w={weight:.2f})"
@@ -1607,6 +1811,409 @@ def create_settings_router(context: SettingsContext) -> Router:
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             text="\n".join(lines),
+        )
+
+    @router.message(Command("trend_scan"))
+    async def trend_scan(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.trend_discovery is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Модуль trend discovery недоступен в текущей конфигурации.",
+            )
+            return
+        hours: int | None = None
+        limit: int | None = None
+        if command and command.args:
+            parts = command.args.strip().split()
+            if len(parts) >= 1:
+                hours = parse_positive_int(parts[0])
+            if len(parts) >= 2:
+                limit = parse_positive_int(parts[1])
+            if len(parts) > 2:
+                hours = None
+                limit = None
+            if (len(parts) >= 1 and hours is None) or (len(parts) >= 2 and limit is None):
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Формат: /trend_scan [hours] [limit]",
+                )
+                return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="Запускаю сканирование трендов...",
+        )
+        try:
+            result = await context.trend_discovery.scan(hours=hours, limit=limit)
+        except Exception:
+            log.exception("settings.trend_scan_failed")
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Ошибка сканирования трендов. Смотри логи.",
+            )
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=(
+                f"Сканирование трендов завершено.\n"
+                f"режим: {result.mode}\n"
+                f"проанализировано материалов: {result.scanned_items}\n"
+                f"создано тем: {result.topics_created}\n"
+                f"кандидатов статей: {result.article_candidates}\n"
+                f"кандидатов источников: {result.source_candidates}\n"
+                f"отправлено сообщений в topic: {result.announced_messages}\n"
+                f"авто-добавлено во входящие: {result.auto_ingested}\n"
+                f"авто-добавлено источников: {result.auto_sources_added}"
+            ),
+        )
+
+    @router.message(Command("trend_profile_add"))
+    async def trend_profile_add(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        parsed = parse_trend_profile_args(command.args if command else None)
+        if parsed is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=(
+                    "Формат: /trend_profile_add <name>|<seed_csv>"
+                    "[|<exclude_csv>|<trusted_domains_csv>|<min_score>]"
+                ),
+            )
+            return
+
+        name, seeds, excludes, trusted_domains, min_score = parsed
+        async with context.session_factory() as session:
+            async with session.begin():
+                existing = await trend_profiles_repo.get_by_name(session, name)
+                existed = existing is not None
+                current_min_score = float(existing.min_article_score) if existing else 1.2
+                profile = await trend_profiles_repo.upsert_by_name(
+                    session,
+                    payload=TrendTopicProfileInput(
+                        name=name,
+                        enabled=True,
+                        seed_keywords=seeds,
+                        exclude_keywords=excludes,
+                        trusted_domains=trusted_domains,
+                        min_article_score=min_score if min_score is not None else current_min_score,
+                        tags={"created_via": "telegram_command"},
+                    ),
+                )
+        action = "обновлён" if existed else "добавлен"
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=(
+                f"Профиль #{profile.id} {action}: {profile.name}\n"
+                f"ключевых слов: {len(profile.seed_keywords or [])}\n"
+                f"исключений: {len(profile.exclude_keywords or [])}\n"
+                f"доверенных доменов: {len(profile.trusted_domains or [])}\n"
+                f"минимальный score: {float(profile.min_article_score):.2f}\n"
+                f"включён: {bool(profile.enabled)}"
+            ),
+        )
+
+    @router.message(Command("trend_profile_list"))
+    async def trend_profile_list(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        include_all = bool(command and command.args and command.args.strip().lower() == "all")
+        async with context.session_factory() as session:
+            async with session.begin():
+                rows = (
+                    await trend_profiles_repo.list_all(session)
+                    if include_all
+                    else await trend_profiles_repo.list_enabled(session)
+                )
+        if not rows:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Профили trend discovery не найдены.",
+            )
+            return
+        lines = [
+            "Профили trend discovery:"
+            if include_all
+            else "Включённые профили trend discovery:"
+        ]
+        for row in rows:
+            lines.append(
+                f"#{row.id} [{('вкл' if row.enabled else 'выкл')}] "
+                f"{row.name} | ключевые={len(row.seed_keywords or [])} | "
+                f"min_score={float(row.min_article_score):.2f}"
+            )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("trend_profile_enable"))
+    async def trend_profile_enable(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        profile_id = parse_positive_int(command.args if command else None)
+        if profile_id is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /trend_profile_enable <profile_id>",
+            )
+            return
+        async with context.session_factory() as session:
+            async with session.begin():
+                updated = await trend_profiles_repo.set_enabled(
+                    session,
+                    profile_id=profile_id,
+                    enabled=True,
+                )
+        if updated is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Профиль #{profile_id} не найден.",
+            )
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"Профиль #{profile_id} включён.",
+        )
+
+    @router.message(Command("trend_profile_disable"))
+    async def trend_profile_disable(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        profile_id = parse_positive_int(command.args if command else None)
+        if profile_id is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /trend_profile_disable <profile_id>",
+            )
+            return
+        async with context.session_factory() as session:
+            async with session.begin():
+                updated = await trend_profiles_repo.set_enabled(
+                    session,
+                    profile_id=profile_id,
+                    enabled=False,
+                )
+        if updated is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Профиль #{profile_id} не найден.",
+            )
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"Профиль #{profile_id} отключён.",
+        )
+
+    @router.message(Command("trend_topics"))
+    async def trend_topics(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.trend_discovery is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Модуль trend discovery недоступен в текущей конфигурации.",
+            )
+            return
+        hours = context.settings.trend_discovery.default_window_hours
+        limit = 10
+        if command and command.args:
+            parts = command.args.strip().split()
+            if len(parts) >= 1:
+                parsed_hours = parse_positive_int(parts[0])
+                if parsed_hours is None:
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text="Формат: /trend_topics [hours] [limit]",
+                    )
+                    return
+                hours = parsed_hours
+            if len(parts) >= 2:
+                parsed_limit = parse_positive_int(parts[1])
+                if parsed_limit is None:
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text="Формат: /trend_topics [hours] [limit]",
+                    )
+                    return
+                limit = parsed_limit
+        rows = await context.trend_discovery.list_topics(hours=hours, limit=limit)
+        if not rows:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Трендовые темы за {hours}ч не найдены.",
+            )
+            return
+        lines = [f"Трендовые темы за {hours}ч (топ {len(rows)}):"]
+        for row in rows:
+            lines.append(
+                f"#{row.id} score={float(row.trend_score):.2f} "
+                f"доверие={float(row.confidence):.2f} {row.topic_name}"
+            )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("trend_articles"))
+    async def trend_articles(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.trend_discovery is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Модуль trend discovery недоступен в текущей конфигурации.",
+            )
+            return
+        parsed = parse_id_and_optional_limit(command.args if command else None)
+        if not parsed:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /trend_articles <topic_id> [limit]",
+            )
+            return
+        topic_id, limit_raw = parsed
+        limit = min(limit_raw or 20, 50)
+        rows = await context.trend_discovery.list_articles(topic_id=topic_id, limit=limit)
+        if not rows:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Кандидатов статей для темы #{topic_id} нет.",
+            )
+            return
+        lines = [f"Кандидаты статей для темы #{topic_id} (топ {len(rows)}):"]
+        for row in rows:
+            status_text = trend_status_labels.get(row.status.value, row.status.value.lower())
+            lines.append(
+                f"#{row.id} [{status_text}] score={float(row.score):.2f} {row.title or row.url}"
+            )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("trend_sources"))
+    async def trend_sources(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.trend_discovery is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Модуль trend discovery недоступен в текущей конфигурации.",
+            )
+            return
+        parsed = parse_id_and_optional_limit(command.args if command else None)
+        if not parsed:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /trend_sources <topic_id> [limit]",
+            )
+            return
+        topic_id, limit_raw = parsed
+        limit = min(limit_raw or 20, 50)
+        rows = await context.trend_discovery.list_sources(topic_id=topic_id, limit=limit)
+        if not rows:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=f"Кандидатов источников для темы #{topic_id} нет.",
+            )
+            return
+        lines = [f"Кандидаты источников для темы #{topic_id} (топ {len(rows)}):"]
+        for row in rows:
+            status_text = trend_status_labels.get(row.status.value, row.status.value.lower())
+            lines.append(
+                f"#{row.id} [{status_text}] score={float(row.score):.2f} домен={row.domain}"
+            )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("trend_ingest"))
+    async def trend_ingest(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.trend_discovery is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Модуль trend discovery недоступен в текущей конфигурации.",
+            )
+            return
+        candidate_id = parse_positive_int(command.args if command else None)
+        if candidate_id is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /trend_ingest <candidate_id>",
+            )
+            return
+        result = await context.trend_discovery.ingest_article_candidate(
+            candidate_id=candidate_id,
+            user_id=message.from_user.id if message.from_user else 0,
+        )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=result.message,
+        )
+
+    @router.message(Command("trend_add_source"))
+    async def trend_add_source(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if context.trend_discovery is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Модуль trend discovery недоступен в текущей конфигурации.",
+            )
+            return
+        candidate_id = parse_positive_int(command.args if command else None)
+        if candidate_id is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /trend_add_source <candidate_id>",
+            )
+            return
+        result = await context.trend_discovery.add_source_candidate(
+            candidate_id=candidate_id,
+            user_id=message.from_user.id if message.from_user else 0,
+        )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=result.message,
         )
 
     @router.message(Command("analytics"))

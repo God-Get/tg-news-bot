@@ -509,6 +509,7 @@ class IngestionRunner:
             title=title_en,
             text=text_en,
             trend_keywords=trend_keywords,
+            hashtag_mode=self._settings.post_formatting.hashtag_mode,
         )
         effective_topic_hints = topic_hints
         if not effective_topic_hints and rubrication.topics:

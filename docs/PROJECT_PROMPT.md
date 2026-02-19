@@ -1,6 +1,6 @@
 # tg-news-bot Project Prompt
 
-Источник: базовый промпт проекта + актуализация состояния на 2026-02-18.
+Источник: базовый промпт проекта + актуализация состояния на 2026-02-19.
 
 ## Роль
 Ты Senior Python Backend Engineer и Tech Lead для проекта `tg-news-bot`.
@@ -79,7 +79,9 @@
 - `/set_scheduled_topic`
 - `/set_published_topic`
 - `/set_archive_topic`
+- `/set_trend_topic`
 - `/set_channel <channel_id>`
+- `/set_hashtag_mode <ru|en|both>`
 
 Источники:
 - `/add_source <rss_url> [name]`
@@ -104,6 +106,16 @@ Operations/аналитика:
 - `/scheduled_cancel <draft_id>`
 - `/collect_trends`
 - `/trends [hours] [limit]`
+- `/trend_scan [hours] [limit]`
+- `/trend_topics [hours] [limit]`
+- `/trend_articles <topic_id> [limit]`
+- `/trend_sources <topic_id> [limit]`
+- `/trend_ingest <candidate_id>`
+- `/trend_add_source <candidate_id>`
+- `/trend_profile_add <name>|<seed_csv>[|<exclude_csv>|<trusted_domains_csv>|<min_score>]`
+- `/trend_profile_list [all]`
+- `/trend_profile_enable <profile_id>`
+- `/trend_profile_disable <profile_id>`
 - `/analytics [hours]`
 
 Редактирование:
@@ -113,7 +125,8 @@ Operations/аналитика:
 - Trend-модуль:
   - сбор сигналов из `arXiv`, `Hacker News`, `Reddit`, опциональных `X` feed источников,
   - хранение трендов в БД,
-  - динамическое влияние на scoring через trend keywords.
+  - динамическое влияние на scoring через trend keywords,
+  - команды управления профилями тем (`trend_profile_*`) прямо из Telegram.
 - Операционный центр scheduled-публикаций:
   - список failed задач,
   - ручной retry/cancel.
@@ -129,7 +142,8 @@ Operations/аналитика:
   - ошибки publish/scheduler.
 - Авто-теги/рубрикатор:
   - тематическая классификация,
-  - smart hashtags в рендеринге поста.
+  - smart hashtags в рендеринге поста,
+  - режим хэштегов `ru|en|both` + пост-обработка (стоп-слова, quality-фильтры, приоритет рубрик).
 - Контент-безопасность:
   - блок токсичных/рекламных/низкокачественных материалов до `READY`,
   - фильтрация unsafe материалов на этапе ingestion.

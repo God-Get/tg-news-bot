@@ -16,6 +16,7 @@ from tg_news_bot.logging import get_logger
 from tg_news_bot.services.edit_sessions import EditSessionService
 from tg_news_bot.services.schedule_input import ScheduleInputService
 
+from tg_news_bot.services.trend_discovery import TrendDiscoveryService
 from tg_news_bot.services.workflow import DraftWorkflowService
 from tg_news_bot.services.workflow_types import DraftAction, TransitionRequest
 from tg_news_bot.telegram.callbacks import parse_callback
@@ -28,11 +29,25 @@ class CallbackContext:
     workflow: DraftWorkflowService
     edit_sessions: EditSessionService
     schedule_input: ScheduleInputService
+    trend_discovery: TrendDiscoveryService | None = None
 
 
 def create_callback_router(context: CallbackContext) -> Router:
     router = Router()
     log = get_logger(__name__)
+
+    def parse_trend_callback(data: str) -> tuple[str, int, str] | None:
+        parts = data.split(":")
+        if len(parts) != 4:
+            return None
+        prefix, kind, candidate_id, action = parts
+        if prefix != "trend":
+            return None
+        if kind not in {"article", "source"}:
+            return None
+        if not candidate_id.isdigit():
+            return None
+        return kind, int(candidate_id), action
 
     def is_admin(query: CallbackQuery) -> bool:
         return bool(query.from_user and query.from_user.id == context.settings.admin_user_id)
@@ -51,6 +66,52 @@ def create_callback_router(context: CallbackContext) -> Router:
         if not query.data:
             await safe_answer(query)
             return
+        trend_callback = parse_trend_callback(query.data)
+        if trend_callback:
+            if context.trend_discovery is None:
+                await safe_answer(query, text="Модуль trend discovery недоступен")
+                return
+            kind, candidate_id, action = trend_callback
+            try:
+                if kind == "article" and action == "ingest":
+                    result = await context.trend_discovery.ingest_article_candidate(
+                        candidate_id=candidate_id,
+                        user_id=query.from_user.id,
+                    )
+                    await safe_answer(query, text=result.message)
+                    return
+                if kind == "article" and action == "reject":
+                    result = await context.trend_discovery.reject_article_candidate(
+                        candidate_id=candidate_id,
+                        user_id=query.from_user.id,
+                    )
+                    await safe_answer(query, text=result.message)
+                    return
+                if kind == "source" and action == "add":
+                    result = await context.trend_discovery.add_source_candidate(
+                        candidate_id=candidate_id,
+                        user_id=query.from_user.id,
+                    )
+                    await safe_answer(query, text=result.message)
+                    return
+                if kind == "source" and action == "reject":
+                    result = await context.trend_discovery.reject_source_candidate(
+                        candidate_id=candidate_id,
+                        user_id=query.from_user.id,
+                    )
+                    await safe_answer(query, text=result.message)
+                    return
+                await safe_answer(query)
+                return
+            except Exception:
+                log.exception(
+                    "callback.trend_action_failed",
+                    candidate_id=candidate_id,
+                    kind=kind,
+                    action=action,
+                )
+                await safe_answer(query, text="Ошибка действия по тренд-кандидату")
+                return
         parsed = parse_callback(query.data)
         if not parsed:
             await safe_answer(query)

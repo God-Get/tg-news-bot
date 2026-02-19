@@ -5,7 +5,17 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Float, ForeignKey, Integer, Text, Index
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    Text,
+    Index,
+)
 from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -64,6 +74,14 @@ class TrendSignalSource(enum.StrEnum):
     REDDIT = "REDDIT"
 
 
+class TrendCandidateStatus(enum.StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    INGESTED = "INGESTED"
+    FAILED = "FAILED"
+
+
 class BotSettings(Base):
     __tablename__ = "bot_settings"
 
@@ -76,6 +94,7 @@ class BotSettings(Base):
     scheduled_topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     published_topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     archive_topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trend_candidates_topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -392,3 +411,132 @@ class SemanticFingerprint(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class TrendTopicProfile(Base):
+    __tablename__ = "trend_topic_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    seed_keywords: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    exclude_keywords: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    trusted_domains: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    min_article_score: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    tags: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class TrendTopic(Base):
+    __tablename__ = "trend_topics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("trend_topic_profiles.id"), nullable=True
+    )
+    topic_name: Mapped[str] = mapped_column(Text, nullable=False)
+    topic_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    trend_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    reasons: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[TrendCandidateStatus] = mapped_column(
+        Enum(TrendCandidateStatus, name="trend_candidate_status"),
+        nullable=False,
+        server_default=TrendCandidateStatus.PENDING.value,
+    )
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    group_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    profile: Mapped[TrendTopicProfile | None] = relationship("TrendTopicProfile")
+
+
+class TrendArticleCandidate(Base):
+    __tablename__ = "trend_article_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey("trend_topics.id"), nullable=False)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_url: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    reasons: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    source_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[TrendCandidateStatus] = mapped_column(
+        Enum(TrendCandidateStatus, name="trend_candidate_status"),
+        nullable=False,
+        server_default=TrendCandidateStatus.PENDING.value,
+    )
+    draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id"), nullable=True)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    group_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    topic_id_telegram: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    topic: Mapped[TrendTopic] = relationship("TrendTopic")
+
+
+class TrendSourceCandidate(Base):
+    __tablename__ = "trend_source_candidates"
+    __table_args__ = (
+        Index(
+            "uq_trend_source_candidates_topic_domain",
+            "topic_id",
+            "domain",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey("trend_topics.id"), nullable=False)
+    domain: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    reasons: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[TrendCandidateStatus] = mapped_column(
+        Enum(TrendCandidateStatus, name="trend_candidate_status"),
+        nullable=False,
+        server_default=TrendCandidateStatus.PENDING.value,
+    )
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id"), nullable=True)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    group_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    topic_id_telegram: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    topic: Mapped[TrendTopic] = relationship("TrendTopic")

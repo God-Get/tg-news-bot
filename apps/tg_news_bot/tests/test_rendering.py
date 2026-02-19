@@ -83,6 +83,62 @@ def test_render_post_content_uses_auto_hashtags_from_reasons() -> None:
     assert "#space_flight" in content.text
 
 
+def test_render_post_content_adds_russian_aliases_for_known_keywords() -> None:
+    draft = _make_draft(
+        state=DraftState.INBOX,
+        post_text_ru="Заголовок\n\nТекст поста",
+        score_reasons={"kw:AI": 1.0, "kw:Space Tech": 0.5},
+    )
+
+    content = render_post_content(draft)
+
+    assert "#ai" in content.text
+    assert "#ии" in content.text
+    assert "#space_tech" in content.text
+    assert "#космос" in content.text
+
+
+def test_render_post_content_keeps_cyrillic_auto_hashtags() -> None:
+    draft = _make_draft(
+        state=DraftState.INBOX,
+        post_text_ru="Заголовок\n\nТекст поста",
+        score_reasons={"auto_hashtags": ["#наука", "машинное_обучение"]},
+    )
+
+    content = render_post_content(draft)
+
+    assert "#наука" in content.text
+    assert "#машинное_обучение" in content.text
+
+
+def test_render_post_content_respects_ru_hashtag_mode() -> None:
+    draft = _make_draft(
+        state=DraftState.INBOX,
+        post_text_ru="Заголовок\n\nТекст поста",
+        score_reasons={"kw:AI": 1.0},
+    )
+    formatting = PostFormattingSettings(source_mode="text", hashtag_mode="ru")
+
+    content = render_post_content(draft, formatting=formatting)
+
+    assert "#ии" in content.text
+    assert "#ai" not in content.text
+
+
+def test_render_post_content_respects_en_hashtag_mode() -> None:
+    draft = _make_draft(
+        state=DraftState.INBOX,
+        post_text_ru="Заголовок\n\nТекст поста",
+        score_reasons={"kw:AI": 1.0},
+    )
+    formatting = PostFormattingSettings(source_mode="text", hashtag_mode="en")
+
+    content = render_post_content(draft, formatting=formatting)
+
+    assert "#ai" in content.text
+    assert "#ии" not in content.text
+
+
 def test_render_post_content_uses_defaults_when_data_missing() -> None:
     draft = _make_draft(
         state=DraftState.INBOX,

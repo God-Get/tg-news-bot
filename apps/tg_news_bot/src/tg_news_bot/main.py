@@ -24,6 +24,7 @@ from tg_news_bot.services.ingestion import IngestionConfig, IngestionRunner
 from tg_news_bot.services.schedule_input import ScheduleInputService
 from tg_news_bot.services.scheduler import SchedulerConfig, SchedulerRunner
 from tg_news_bot.services.text_generation import build_text_pipeline
+from tg_news_bot.services.trend_discovery import TrendDiscoveryService
 from tg_news_bot.services.trends import TrendCollector
 from tg_news_bot.services.workflow import DraftWorkflowService
 from tg_news_bot.telegram.handlers.callbacks import CallbackContext, create_callback_router
@@ -80,6 +81,12 @@ async def _run() -> int:
         post_formatting=settings.post_formatting,
         text_pipeline=workflow_text_pipeline,
     )
+    trend_discovery = TrendDiscoveryService(
+        settings=settings,
+        session_factory=session_factory,
+        publisher=publisher,
+        ingestion_runner=ingestion,
+    )
 
     settings_context = SettingsContext(
         settings=settings,
@@ -90,13 +97,17 @@ async def _run() -> int:
         ingestion_runner=ingestion,
         workflow=workflow,
         trend_collector=trend_collector,
+        trend_discovery=trend_discovery,
         scheduled_repo=ScheduledPostRepository(),
         draft_repo=DraftRepository(),
         analytics=AnalyticsService(session_factory),
     )
     dispatcher.include_router(create_settings_router(settings_context))
 
-    edit_service = EditSessionService(publisher)
+    edit_service = EditSessionService(
+        publisher,
+        post_formatting=settings.post_formatting,
+    )
     edit_context = EditContext(
         settings=settings,
         session_factory=session_factory,
@@ -123,6 +134,7 @@ async def _run() -> int:
         workflow=workflow,
         edit_sessions=edit_service,
         schedule_input=schedule_input_service,
+        trend_discovery=trend_discovery,
     )
     dispatcher.include_router(create_callback_router(callback_context))
 

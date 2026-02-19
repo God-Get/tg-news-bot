@@ -59,6 +59,105 @@ class TrendsSettings(BaseModel):
     hn_top_n: int = Field(80, ge=10, le=500)
 
 
+class TrendDiscoveryProfileSettings(BaseModel):
+    name: str
+    seed_keywords: list[str]
+    exclude_keywords: list[str] = Field(default_factory=list)
+    trusted_domains: list[str] = Field(default_factory=list)
+    min_article_score: float = Field(1.2, ge=-10.0, le=20.0)
+    enabled: bool = True
+
+
+class TrendDiscoverySettings(BaseModel):
+    enabled: bool = True
+    mode: str = "suggest"
+    default_window_hours: int = Field(24, ge=1, le=240)
+    max_window_hours: int = Field(240, ge=1, le=720)
+    default_topic_limit: int = Field(5, ge=1, le=20)
+    max_topic_limit: int = Field(20, ge=1, le=50)
+    item_limit_per_source: int = Field(60, ge=5, le=300)
+    max_articles_per_topic: int = Field(10, ge=1, le=30)
+    max_sources_per_topic: int = Field(6, ge=1, le=30)
+    min_topic_score: float = Field(2.0, ge=0.0, le=100.0)
+    article_snippet_chars: int = Field(280, ge=80, le=1200)
+    ai_enrichment: bool = True
+    auto_ingest_min_score: float = Field(4.0, ge=0.0, le=100.0)
+    auto_add_source_min_score: float = Field(4.0, ge=0.0, le=100.0)
+    profiles: list[TrendDiscoveryProfileSettings] = Field(
+        default_factory=lambda: [
+            TrendDiscoveryProfileSettings(
+                name="AI",
+                seed_keywords=[
+                    "ai",
+                    "artificial intelligence",
+                    "llm",
+                    "gpt",
+                    "openai",
+                    "anthropic",
+                    "deepmind",
+                    "machine learning",
+                    "inference",
+                ],
+                exclude_keywords=["casino", "betting", "giveaway"],
+                min_article_score=1.3,
+            ),
+            TrendDiscoveryProfileSettings(
+                name="Science",
+                seed_keywords=[
+                    "research",
+                    "study",
+                    "scientists",
+                    "nature",
+                    "cell",
+                    "genome",
+                    "quantum",
+                    "biology",
+                ],
+                exclude_keywords=["sponsored", "promo"],
+                min_article_score=1.1,
+            ),
+            TrendDiscoveryProfileSettings(
+                name="Space",
+                seed_keywords=[
+                    "space",
+                    "nasa",
+                    "spacex",
+                    "rocket",
+                    "orbit",
+                    "satellite",
+                    "moon",
+                    "mars",
+                    "telescope",
+                ],
+                min_article_score=1.2,
+            ),
+            TrendDiscoveryProfileSettings(
+                name="New Energy",
+                seed_keywords=[
+                    "battery",
+                    "fusion",
+                    "solar",
+                    "wind",
+                    "hydrogen",
+                    "nuclear",
+                    "grid",
+                    "energy storage",
+                    "decarbonization",
+                ],
+                min_article_score=1.2,
+            ),
+        ]
+    )
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in {"off", "suggest", "auto"}:
+            raise ValueError("trend_discovery.mode must be one of: off, suggest, auto")
+        return mode
+
+
 class SourceQualitySettings(BaseModel):
     enabled: bool = True
     auto_disable_enabled: bool = True
@@ -180,6 +279,7 @@ class PostFormattingSettings(BaseModel):
     sections_order: str = "title,body,hashtags,source"
     hashtags_limit: int = Field(5, ge=0, le=10)
     fallback_hashtag: str = "news"
+    hashtag_mode: str = "both"
     source_label: str = "Источник"
     source_mode: str = "button"
     discussion_url: str | None = None
@@ -192,6 +292,14 @@ class PostFormattingSettings(BaseModel):
         mode = value.strip().lower()
         if mode not in {"text", "button", "both"}:
             raise ValueError("source_mode must be one of: text, button, both")
+        return mode
+
+    @field_validator("hashtag_mode")
+    @classmethod
+    def validate_hashtag_mode(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in {"ru", "en", "both"}:
+            raise ValueError("hashtag_mode must be one of: ru, en, both")
         return mode
 
     @field_validator("discussion_url")
@@ -242,6 +350,7 @@ class Settings(BaseSettings):
     rss: RSSSettings = RSSSettings()
     scoring: ScoringSettings = ScoringSettings()
     trends: TrendsSettings = TrendsSettings()
+    trend_discovery: TrendDiscoverySettings = TrendDiscoverySettings()
     source_quality: SourceQualitySettings = SourceQualitySettings()
     semantic_dedup: SemanticDedupSettings = SemanticDedupSettings()
     content_safety: ContentSafetySettings = ContentSafetySettings()

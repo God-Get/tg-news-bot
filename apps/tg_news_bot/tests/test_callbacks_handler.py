@@ -107,6 +107,30 @@ class _ScheduleInputSpy:
 
 
 @dataclass
+class _TrendDiscoverySpy:
+    ingest_calls: list[int] = field(default_factory=list)
+    reject_article_calls: list[int] = field(default_factory=list)
+    add_source_calls: list[int] = field(default_factory=list)
+    reject_source_calls: list[int] = field(default_factory=list)
+
+    async def ingest_article_candidate(self, *, candidate_id: int, user_id: int):  # noqa: ANN001
+        self.ingest_calls.append(candidate_id)
+        return SimpleNamespace(message=f"ingested {candidate_id}")
+
+    async def reject_article_candidate(self, *, candidate_id: int, user_id: int):  # noqa: ANN001
+        self.reject_article_calls.append(candidate_id)
+        return SimpleNamespace(message=f"rejected article {candidate_id}")
+
+    async def add_source_candidate(self, *, candidate_id: int, user_id: int):  # noqa: ANN001
+        self.add_source_calls.append(candidate_id)
+        return SimpleNamespace(message=f"added source {candidate_id}")
+
+    async def reject_source_candidate(self, *, candidate_id: int, user_id: int):  # noqa: ANN001
+        self.reject_source_calls.append(candidate_id)
+        return SimpleNamespace(message=f"rejected source {candidate_id}")
+
+
+@dataclass
 class _Query:
     data: str | None
     user_id: int = 10
@@ -137,6 +161,7 @@ def _make_context(
     schedule_input: _ScheduleInputSpy,
     *,
     timezone_name: str = "UTC",
+    trend_discovery: _TrendDiscoverySpy | None = None,
 ) -> CallbackContext:
     settings = SimpleNamespace(
         admin_user_id=10,
@@ -148,6 +173,7 @@ def _make_context(
         workflow=workflow,
         edit_sessions=edit_sessions,
         schedule_input=schedule_input,
+        trend_discovery=trend_discovery,
     )
 
 
@@ -413,3 +439,55 @@ async def test_callback_content_safety_error_is_reported() -> None:
     await handler(query)
 
     assert query.answers == ["Контент не прошёл safety: ad:sponsored"]
+
+
+@pytest.mark.asyncio
+async def test_trend_article_callbacks_dispatch_to_trend_service() -> None:
+    workflow = _WorkflowSpy()
+    edit_sessions = _EditSessionsSpy()
+    schedule_input = _ScheduleInputSpy()
+    trend_discovery = _TrendDiscoverySpy()
+    handler = _get_handler(
+        _make_context(
+            workflow,
+            edit_sessions,
+            schedule_input,
+            trend_discovery=trend_discovery,
+        )
+    )
+
+    ingest_query = _Query(data="trend:article:15:ingest")
+    reject_query = _Query(data="trend:article:16:reject")
+    await handler(ingest_query)
+    await handler(reject_query)
+
+    assert trend_discovery.ingest_calls == [15]
+    assert trend_discovery.reject_article_calls == [16]
+    assert ingest_query.answers == ["ingested 15"]
+    assert reject_query.answers == ["rejected article 16"]
+
+
+@pytest.mark.asyncio
+async def test_trend_source_callbacks_dispatch_to_trend_service() -> None:
+    workflow = _WorkflowSpy()
+    edit_sessions = _EditSessionsSpy()
+    schedule_input = _ScheduleInputSpy()
+    trend_discovery = _TrendDiscoverySpy()
+    handler = _get_handler(
+        _make_context(
+            workflow,
+            edit_sessions,
+            schedule_input,
+            trend_discovery=trend_discovery,
+        )
+    )
+
+    add_query = _Query(data="trend:source:77:add")
+    reject_query = _Query(data="trend:source:78:reject")
+    await handler(add_query)
+    await handler(reject_query)
+
+    assert trend_discovery.add_source_calls == [77]
+    assert trend_discovery.reject_source_calls == [78]
+    assert add_query.answers == ["added source 77"]
+    assert reject_query.answers == ["rejected source 78"]

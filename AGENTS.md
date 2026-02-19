@@ -23,11 +23,12 @@
 - При move между topics создается новая пара `POST+CARD`, старая удаляется.
 
 ## 4. Команды (должны оставаться рабочими)
-- Настройка: `/commands`, `/status`, `/set_group`, `/set_inbox_topic`, `/set_service_topic`, `/set_ready_topic`, `/set_scheduled_topic`, `/set_published_topic`, `/set_archive_topic`, `/set_channel <channel_id>`.
+- Настройка: `/commands`, `/status`, `/set_group`, `/set_inbox_topic`, `/set_service_topic`, `/set_ready_topic`, `/set_scheduled_topic`, `/set_published_topic`, `/set_archive_topic`, `/set_trend_topic`, `/set_channel <channel_id>`, `/set_hashtag_mode <ru|en|both>`.
 - Источники: `/add_source <rss_url> [name]`, `/list_sources`, `/source_quality [source_id]`, `/set_source_topics <source_id> <topics>`, `/clear_source_topics <source_id>`, `/set_source_ssl_insecure <source_id> <on|off>`, `/enable_source <source_id>`, `/disable_source <source_id>`, `/remove_source <source_id>`.
 - Ingestion: `/ingest_now`, `/ingest_source <source_id>`, `/ingest_url <article_url> [source_id]`.
 - Обработка текста: `/process_range <from_id> <to_id>`.
-- Operations: `/scheduled_failed_list [limit]`, `/scheduled_retry <draft_id>`, `/scheduled_cancel <draft_id>`, `/collect_trends`, `/trends [hours] [limit]`, `/analytics [hours]`.
+- Operations: `/scheduled_failed_list [limit]`, `/scheduled_retry <draft_id>`, `/scheduled_cancel <draft_id>`, `/collect_trends`, `/trends [hours] [limit]`, `/trend_scan [hours] [limit]`, `/trend_topics [hours] [limit]`, `/trend_articles <topic_id> [limit]`, `/trend_sources <topic_id> [limit]`, `/trend_ingest <candidate_id>`, `/trend_add_source <candidate_id>`, `/analytics [hours]`.
+- Управление профилями трендов: `/trend_profile_add <name>|<seed_csv>[|<exclude_csv>|<trusted_domains_csv>|<min_score>]`, `/trend_profile_list [all]`, `/trend_profile_enable <profile_id>`, `/trend_profile_disable <profile_id>`.
 - Редактирование: `/cancel`.
 
 ## 5. Правила внесения изменений
@@ -57,4 +58,5 @@
 - Runbook восстановления и backup/restore Postgres.
 - Улучшенный image filtering (анти-логотип, качество).
 - Точная калибровка весов трендов/trust-score/dedup и safety-порогов на боевых данных.
+- Расширение тренд-профилей: шаблоны для разных рубрик + A/B оценка качества сигналов.
 - Multi-admin роли и ACL: отложено, пока не завершены пункты выше.

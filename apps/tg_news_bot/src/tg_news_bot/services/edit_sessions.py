@@ -16,6 +16,7 @@ from tg_news_bot.ports.publisher import (
     PublisherNotModified,
     PublisherPort,
 )
+from tg_news_bot.config import PostFormattingSettings
 from tg_news_bot.repositories.bot_settings import BotSettingsRepository
 from tg_news_bot.repositories.drafts import DraftRepository
 from tg_news_bot.repositories.edit_sessions import EditSessionRepository
@@ -44,11 +45,13 @@ class EditSessionService:
         settings_repo: BotSettingsRepository | None = None,
         draft_repo: DraftRepository | None = None,
         edit_repo: EditSessionRepository | None = None,
+        post_formatting: PostFormattingSettings | None = None,
     ) -> None:
         self._publisher = publisher
         self._settings_repo = settings_repo or BotSettingsRepository()
         self._draft_repo = draft_repo or DraftRepository()
         self._edit_repo = edit_repo or EditSessionRepository()
+        self._post_formatting = post_formatting
 
     async def start(self, session: AsyncSession, *, draft_id: int, user_id: int) -> None:
         settings = await self._settings_repo.get_or_create(session)
@@ -200,7 +203,7 @@ class EditSessionService:
             raise RuntimeError("Draft has no group/topic for editing")
 
         keyboard = build_state_keyboard(draft, draft.state)
-        post_content = render_post_content(draft)
+        post_content = render_post_content(draft, formatting=self._post_formatting)
         current_post_id = draft.post_message_id
 
         if not current_post_id:

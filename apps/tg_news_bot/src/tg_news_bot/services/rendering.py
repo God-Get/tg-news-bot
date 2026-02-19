@@ -17,6 +17,43 @@ DEFAULT_BODY = "Текст будет добавлен после обработ
 _ALLOWED_SECTIONS = ("title", "body", "hashtags", "source")
 _DEFAULT_ORDER = ["title", "body", "hashtags", "source"]
 _DEFAULT_FORMATTING = PostFormattingSettings()
+_RU_HASHTAG_ALIASES = {
+    "ai": "ии",
+    "artificial_intelligence": "ии",
+    "machine_learning": "машинное_обучение",
+    "deep_learning": "глубокое_обучение",
+    "neural_network": "нейросети",
+    "science": "наука",
+    "space": "космос",
+    "space_tech": "космос",
+    "energy": "энергия",
+    "new_energy": "новая_энергия",
+    "biotech": "биотех",
+    "technology": "технологии",
+    "tech": "технологии",
+}
+_CANONICAL_HASHTAGS = {
+    "artificial_intelligence": "ai",
+    "machine_learning": "machine_learning",
+    "deep_learning": "deep_learning",
+    "neural_network": "neural_network",
+    "space_tech": "space",
+    "new_energy": "energy",
+    "technology": "technology",
+    "tech": "technology",
+}
+_HASHTAG_STOPWORDS = {
+    "update",
+    "updates",
+    "article",
+    "articles",
+    "summary",
+    "source",
+    "report",
+    "official",
+    "today",
+    "yesterday",
+}
 
 
 def render_post_content(
@@ -33,6 +70,7 @@ def render_post_content(
         draft,
         limit=fmt.hashtags_limit,
         fallback=fmt.fallback_hashtag,
+        mode=fmt.hashtag_mode,
     )
     title_markup = f"<b>{escape(title)}</b>"
     hashtags_text = escape(" ".join(hashtags) if hashtags else "")
@@ -211,6 +249,7 @@ def _extract_hashtags(
     *,
     limit: int,
     fallback: str,
+    mode: str,
 ) -> list[str]:
     if limit <= 0:
         return []
@@ -218,41 +257,110 @@ def _extract_hashtags(
     tags: list[str] = []
     seen: set[str] = set()
 
+    mode_normalized = _normalize_hashtag_mode(mode)
+
+    def add_variants(raw_value: str) -> None:
+        for normalized in _iter_tag_variants(raw_value, mode=mode_normalized):
+            canonical = _canonical_tag(normalized)
+            if normalized and canonical not in seen and _is_quality_tag(normalized):
+                seen.add(canonical)
+                tags.append(f"#{normalized}")
+            if len(tags) >= limit:
+                break
+
     reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
     auto_hashtags = reasons.get("auto_hashtags")
     if isinstance(auto_hashtags, list):
         for item in auto_hashtags:
-            normalized = _normalize_tag(str(item).lstrip("#"))
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                tags.append(f"#{normalized}")
+            add_variants(str(item).lstrip("#"))
+            if len(tags) >= limit:
+                return tags[:limit]
 
     for key in reasons:
         if key.startswith("kw:"):
-            tag = _normalize_tag(key.removeprefix("kw:"))
-            if tag and tag not in seen:
-                seen.add(tag)
-                tags.append(f"#{tag}")
+            add_variants(key.removeprefix("kw:"))
+            if len(tags) >= limit:
+                return tags[:limit]
 
     domain_tag = _normalize_tag(draft.domain or "")
-    if domain_tag and domain_tag not in seen:
+    domain_canonical = _canonical_tag(domain_tag)
+    if domain_tag and domain_canonical not in seen and _is_quality_tag(domain_tag):
+        seen.add(domain_canonical)
         tags.append(f"#{domain_tag}")
 
     if not tags:
-        fallback_tag = _normalize_tag(fallback)
-        if fallback_tag:
-            tags = [f"#{fallback_tag}"]
+        for fallback_tag in _iter_tag_variants(fallback, mode=mode_normalized):
+            canonical = _canonical_tag(fallback_tag)
+            if fallback_tag and canonical not in seen and _is_quality_tag(fallback_tag):
+                seen.add(canonical)
+                tags.append(f"#{fallback_tag}")
+            if len(tags) >= limit:
+                break
 
     return tags[:limit]
 
 
+def _iter_tag_variants(value: str, *, mode: str) -> list[str]:
+    base = _normalize_tag(value)
+    if not base:
+        return []
+    translated_tag = ""
+    translated = _RU_HASHTAG_ALIASES.get(base)
+    if translated:
+        translated_tag = _normalize_tag(translated)
+
+    if mode == "en":
+        return [base]
+    if mode == "ru":
+        if translated_tag:
+            return [translated_tag]
+        if _contains_cyrillic(base):
+            return [base]
+        return []
+
+    variants = [base]
+    if translated_tag and translated_tag not in variants:
+        variants.append(translated_tag)
+    return variants
+
+
 def _normalize_tag(value: str) -> str:
-    text = re.sub(r"[^0-9a-zA-Z_]+", "_", value.strip().lower()).strip("_")
+    text = re.sub(r"[^0-9a-zA-Zа-яА-ЯёЁ_]+", "_", value.strip().lower()).strip("_")
     if not text:
         return ""
     if text[0].isdigit():
         return f"tag_{text}"
     return text
+
+
+def _canonical_tag(value: str) -> str:
+    return _CANONICAL_HASHTAGS.get(value, value)
+
+
+def _is_quality_tag(value: str) -> bool:
+    if value in _HASHTAG_STOPWORDS:
+        return False
+    if len(value) < 2 or len(value) > 32:
+        return False
+    if value.isdigit():
+        return False
+    if value.startswith("http"):
+        return False
+    letters = [ch for ch in value if ch != "_" and ch.isalpha()]
+    if len(letters) < 2:
+        return False
+    return True
+
+
+def _normalize_hashtag_mode(value: str) -> str:
+    mode = (value or "both").strip().lower()
+    if mode not in {"ru", "en", "both"}:
+        return "both"
+    return mode
+
+
+def _contains_cyrillic(value: str) -> bool:
+    return bool(re.search(r"[а-яё]", value.lower()))
 
 
 def _normalize_escaped_whitespace(value: str) -> str:
