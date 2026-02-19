@@ -139,6 +139,24 @@ def test_render_post_content_respects_en_hashtag_mode() -> None:
     assert "#ии" not in content.text
 
 
+def test_render_post_content_uses_manual_hashtags_override() -> None:
+    draft = _make_draft(
+        state=DraftState.INBOX,
+        post_text_ru="Заголовок\n\nТекст поста",
+        score_reasons={
+            "manual_hashtags": ["#мой_тег", "#космос"],
+            "kw:AI": 1.0,
+        },
+    )
+    formatting = PostFormattingSettings(source_mode="text", hashtag_mode="both")
+
+    content = render_post_content(draft, formatting=formatting)
+
+    assert "#мой_тег" in content.text
+    assert "#космос" in content.text
+    assert "#ai" not in content.text
+
+
 def test_render_post_content_uses_defaults_when_data_missing() -> None:
     draft = _make_draft(
         state=DraftState.INBOX,

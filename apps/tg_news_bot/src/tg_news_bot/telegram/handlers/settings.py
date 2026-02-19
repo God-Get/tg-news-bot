@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from urllib.parse import urlparse
 
 import feedparser
@@ -114,6 +115,18 @@ def create_settings_router(context: SettingsContext) -> Router:
             "description": "Переключает режим хэштегов в постах: только RU, только EN или оба.",
             "where": "Обычно #General.",
             "example": "/set_hashtag_mode ru",
+        },
+        "set_draft_hashtags": {
+            "syntax": "/set_draft_hashtags <draft_id> <tag1 tag2 ... | tag1,tag2,...>",
+            "description": "Ручная установка хэштегов для draft (перезаписывает авто-теги).",
+            "where": "Обычно #General.",
+            "example": "/set_draft_hashtags 245 #ии #космос #технологии",
+        },
+        "clear_draft_hashtags": {
+            "syntax": "/clear_draft_hashtags <draft_id>",
+            "description": "Очищает ручные хэштеги и возвращает авто-генерацию.",
+            "where": "Обычно #General.",
+            "example": "/clear_draft_hashtags 245",
         },
         "add_source": {
             "syntax": "/add_source <rss_url> [name]",
@@ -250,6 +263,30 @@ def create_settings_router(context: SettingsContext) -> Router:
             "where": "Обычно #General.",
             "example": "/trend_profile_disable 7",
         },
+        "trend_theme_add": {
+            "syntax": "/trend_theme_add <name>|<seed_csv>[|<exclude_csv>|<trusted_domains_csv>|<min_score>]",
+            "description": "Алиас темы трендов: добавляет/обновляет тему поиска в интернет-скоринге.",
+            "where": "Обычно #General.",
+            "example": "/trend_theme_add AI|ai,llm,inference|casino,betting|openai.com,arxiv.org|1.3",
+        },
+        "trend_theme_list": {
+            "syntax": "/trend_theme_list [all]",
+            "description": "Алиас темы трендов: список активных/всех тем для сканирования.",
+            "where": "Обычно #General.",
+            "example": "/trend_theme_list all",
+        },
+        "trend_theme_enable": {
+            "syntax": "/trend_theme_enable <theme_id>",
+            "description": "Алиас темы трендов: включает тему поиска.",
+            "where": "Обычно #General.",
+            "example": "/trend_theme_enable 7",
+        },
+        "trend_theme_disable": {
+            "syntax": "/trend_theme_disable <theme_id>",
+            "description": "Алиас темы трендов: отключает тему поиска.",
+            "where": "Обычно #General.",
+            "example": "/trend_theme_disable 7",
+        },
         "trend_topics": {
             "syntax": "/trend_topics [hours] [limit]",
             "description": "Показывает найденные трендовые темы за окно времени.",
@@ -306,6 +343,8 @@ def create_settings_router(context: SettingsContext) -> Router:
             "set_trend_topic",
             "set_channel",
             "set_hashtag_mode",
+            "set_draft_hashtags",
+            "clear_draft_hashtags",
         },
         "Источники": {
             "add_source",
@@ -335,6 +374,10 @@ def create_settings_router(context: SettingsContext) -> Router:
             "trend_profile_list",
             "trend_profile_enable",
             "trend_profile_disable",
+            "trend_theme_add",
+            "trend_theme_list",
+            "trend_theme_enable",
+            "trend_theme_disable",
             "trend_topics",
             "trend_articles",
             "trend_sources",
@@ -467,6 +510,32 @@ def create_settings_router(context: SettingsContext) -> Router:
         if mode not in {"ru", "en", "both"}:
             return None
         return mode
+
+    def parse_draft_hashtags_args(raw: str | None) -> tuple[int, list[str]] | None:
+        if raw is None:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        parts = text.split(maxsplit=1)
+        draft_id = parse_positive_int(parts[0])
+        if draft_id is None:
+            return None
+        if len(parts) == 1:
+            return draft_id, []
+        raw_tags = parts[1]
+        tags: list[str] = []
+        seen: set[str] = set()
+        for token in re.split(r"[,\s]+", raw_tags):
+            value = token.strip().lstrip("#").lower()
+            if not value:
+                continue
+            if not re.fullmatch(r"[0-9a-zа-яё_]{2,32}", value):
+                continue
+            if value not in seen:
+                seen.add(value)
+                tags.append(value)
+        return draft_id, tags
 
     def parse_id_and_optional_limit(raw: str | None) -> tuple[int, int | None] | None:
         if raw is None:
@@ -850,6 +919,88 @@ def create_settings_router(context: SettingsContext) -> Router:
             text=f"Режим хэштегов обновлён: {mode}",
         )
 
+    @router.message(Command("set_draft_hashtags"))
+    async def set_draft_hashtags(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        parsed = parse_draft_hashtags_args(command.args if command else None)
+        if parsed is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /set_draft_hashtags <draft_id> <tag1 tag2 ... | tag1,tag2,...>",
+            )
+            return
+        draft_id, tags = parsed
+        if not tags:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Нужно указать хотя бы один валидный хэштег.",
+            )
+            return
+        async with context.session_factory() as session:
+            async with session.begin():
+                draft = await draft_repo.get_for_update(session, draft_id)
+                if draft is None:
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text=f"Draft #{draft_id} не найден.",
+                    )
+                    return
+                reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+                reasons["manual_hashtags"] = [f"#{tag}" for tag in tags]
+                draft.score_reasons = reasons
+                await session.flush()
+        if context.workflow is not None:
+            try:
+                await context.workflow.refresh_draft_messages(draft_id=draft_id)
+            except Exception:
+                log.exception("settings.set_draft_hashtags_refresh_failed", draft_id=draft_id)
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"Ручные хэштеги для Draft #{draft_id}: {' '.join(f'#{tag}' for tag in tags)}",
+        )
+
+    @router.message(Command("clear_draft_hashtags"))
+    async def clear_draft_hashtags(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        draft_id = parse_positive_int(command.args if command else None)
+        if draft_id is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /clear_draft_hashtags <draft_id>",
+            )
+            return
+        async with context.session_factory() as session:
+            async with session.begin():
+                draft = await draft_repo.get_for_update(session, draft_id)
+                if draft is None:
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text=f"Draft #{draft_id} не найден.",
+                    )
+                    return
+                reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+                reasons.pop("manual_hashtags", None)
+                draft.score_reasons = reasons if reasons else None
+                await session.flush()
+        if context.workflow is not None:
+            try:
+                await context.workflow.refresh_draft_messages(draft_id=draft_id)
+            except Exception:
+                log.exception("settings.clear_draft_hashtags_refresh_failed", draft_id=draft_id)
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=f"Ручные хэштеги для Draft #{draft_id} очищены. Включена авто-генерация.",
+        )
+
     @router.message(Command("status"))
     async def status(message: Message) -> None:
         if not is_admin(message):
@@ -881,6 +1032,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             f"sources_avg_trust: {avg_trust:.2f}",
             f"hashtags_mode: {context.settings.post_formatting.hashtag_mode}",
             f"trend_discovery_mode: {context.settings.trend_discovery.mode}",
+            f"internet_scoring_enabled: {context.settings.internet_scoring.enabled}",
         ]
         await context.publisher.send_text(
             chat_id=message.chat.id,
@@ -2020,6 +2172,30 @@ def create_settings_router(context: SettingsContext) -> Router:
             topic_id=message.message_thread_id,
             text=f"Профиль #{profile_id} отключён.",
         )
+
+    @router.message(Command("trend_theme_add"))
+    async def trend_theme_add(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        await trend_profile_add(message, command)
+
+    @router.message(Command("trend_theme_list"))
+    async def trend_theme_list(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        await trend_profile_list(message, command)
+
+    @router.message(Command("trend_theme_enable"))
+    async def trend_theme_enable(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        await trend_profile_enable(message, command)
+
+    @router.message(Command("trend_theme_disable"))
+    async def trend_theme_disable(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        await trend_profile_disable(message, command)
 
     @router.message(Command("trend_topics"))
     async def trend_topics(message: Message, command: CommandObject) -> None:

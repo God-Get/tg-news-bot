@@ -491,6 +491,9 @@ class DraftWorkflowService:
         except (PublisherNotFound, PublisherEditNotAllowed, PublisherNotModified):
             return
 
+    async def refresh_draft_messages(self, *, draft_id: int) -> None:
+        await self._refresh_draft_messages(draft_id=draft_id)
+
     def _ensure_ready_content_is_safe(self, draft: Draft) -> None:
         check = self._content_safety.check(
             text=draft.post_text_ru,

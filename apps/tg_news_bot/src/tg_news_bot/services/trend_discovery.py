@@ -43,19 +43,15 @@ from tg_news_bot.repositories.trend_topic_profiles import (
     TrendTopicProfileInput,
     TrendTopicProfileRepository,
 )
+from tg_news_bot.services.internet_scoring import (
+    InternetScoringContext,
+    InternetScoringService,
+)
 from tg_news_bot.services.text_generation import OpenAICompatClient
 from tg_news_bot.utils.url import extract_domain, normalize_url
 
 if False:  # pragma: no cover
     from tg_news_bot.services.ingestion import IngestionRunner
-
-
-_SOURCE_WEIGHTS = {
-    "ARXIV": 1.25,
-    "HN": 1.0,
-    "REDDIT": 0.9,
-    "X": 0.8,
-}
 
 
 @dataclass(slots=True)
@@ -77,6 +73,8 @@ class ProfileMatchedItem:
     seed_hits: list[str]
     exclude_hits: list[str]
     trust_boost: float
+    score_components: dict[str, float]
+    signal_hits: list[str]
 
 
 @dataclass(slots=True)
@@ -111,6 +109,7 @@ class TrendDiscoveryService:
         profiles_repo: TrendTopicProfileRepository | None = None,
         candidates_repo: TrendCandidateRepository | None = None,
         sources_repo: SourceRepository | None = None,
+        internet_scoring: InternetScoringService | None = None,
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
@@ -120,6 +119,11 @@ class TrendDiscoveryService:
         self._profiles_repo = profiles_repo or TrendTopicProfileRepository()
         self._candidates_repo = candidates_repo or TrendCandidateRepository()
         self._sources_repo = sources_repo or SourceRepository()
+        self._internet_scoring = internet_scoring or InternetScoringService(
+            settings=settings.internet_scoring,
+            trends_settings=settings.trends,
+            session_factory=session_factory,
+        )
         self._log = get_logger(__name__)
         self._llm_client = self._build_llm_client()
 
@@ -210,6 +214,7 @@ class TrendDiscoveryService:
         topic_ids: list[int] = []
         article_ids: list[int] = []
         source_ids: list[int] = []
+        internet_context = await self._internet_scoring.build_context()
 
         async with self._session_factory() as session:
             async with session.begin():
@@ -235,6 +240,7 @@ class TrendDiscoveryService:
                     profiles=profiles,
                     trust_by_domain=trust_by_domain,
                     topic_limit=topic_limit,
+                    internet_context=internet_context,
                 )
 
                 for profile, matched, topic_name, topic_score, confidence, reasons in topic_candidates:
@@ -271,6 +277,11 @@ class TrendDiscoveryService:
                                     "exclude_hits": row.exclude_hits,
                                     "trust_boost": round(row.trust_boost, 3),
                                     "source": row.item.source_name,
+                                    "internet_components": {
+                                        key: round(float(value), 3)
+                                        for key, value in row.score_components.items()
+                                    },
+                                    "internet_signal_hits": row.signal_hits,
                                 },
                                 source_name=row.item.source_name,
                                 source_ref=row.item.source_ref,
@@ -792,6 +803,7 @@ class TrendDiscoveryService:
         profiles: list,
         trust_by_domain: dict[str, float],
         topic_limit: int,
+        internet_context: InternetScoringContext,
     ) -> list[tuple[object, list[ProfileMatchedItem], str, float, float, dict]]:
         rows: list[tuple[object, list[ProfileMatchedItem], str, float, float, dict]] = []
         for profile in profiles:
@@ -805,7 +817,12 @@ class TrendDiscoveryService:
             )
             matched: list[ProfileMatchedItem] = []
             for item in items:
-                scored = self._score_item_for_profile(config, item, trust_by_domain)
+                scored = self._score_item_for_profile(
+                    config,
+                    item,
+                    trust_by_domain,
+                    internet_context,
+                )
                 if scored:
                     matched.append(scored)
             if not matched:
@@ -825,6 +842,8 @@ class TrendDiscoveryService:
                 "unique_domains": unique_domains,
                 "unique_sources": unique_sources,
                 "top_keywords": self._top_keywords(matched),
+                "internet_providers": dict(internet_context.provider_stats),
+                "top_signal_hits": self._top_signal_hits(matched),
             }
             if ai_title:
                 reasons["ai_title"] = ai_title
@@ -861,6 +880,7 @@ class TrendDiscoveryService:
         profile: TrendDiscoveryProfileSettings,
         item: NetworkTrendItem,
         trust_by_domain: dict[str, float],
+        internet_context: InternetScoringContext,
     ) -> ProfileMatchedItem | None:
         text = _compact(f"{item.title} {item.summary}").lower()
         if not text:
@@ -874,18 +894,19 @@ class TrendDiscoveryService:
         if len(excludes) >= len(seeds):
             return None
 
-        score = len(seeds) * 1.25 - len(excludes) * 1.5
-        score += _SOURCE_WEIGHTS.get(item.source_name, 0.7)
-
         trusted_domains = {value.lower() for value in profile.trusted_domains}
-        if item.domain.lower() in trusted_domains:
-            score += 0.7
-
         trust_raw = trust_by_domain.get(item.domain.lower())
-        trust_boost = 0.0
-        if trust_raw is not None:
-            trust_boost = max(min(float(trust_raw) * 0.12, 1.0), -1.0)
-            score += trust_boost
+        score_result = self._internet_scoring.score_item(
+            text=text,
+            source_name=item.source_name,
+            seed_hits=seeds,
+            exclude_hits=excludes,
+            trusted_domain_match=item.domain.lower() in trusted_domains,
+            source_trust_score=trust_raw,
+            signal_boosts=internet_context.signal_boosts,
+        )
+        score = score_result.total
+        trust_boost = float(score_result.components.get("source_trust", 0.0))
 
         if score <= 0:
             return None
@@ -896,6 +917,8 @@ class TrendDiscoveryService:
             seed_hits=seeds,
             exclude_hits=excludes,
             trust_boost=trust_boost,
+            score_components=score_result.components,
+            signal_hits=score_result.signal_hits,
         )
 
     @staticmethod
@@ -911,6 +934,13 @@ class TrendDiscoveryService:
         counts: Counter[str] = Counter()
         for row in matched:
             counts.update(item.lower() for item in row.seed_hits)
+        return [value for value, _ in counts.most_common(limit)]
+
+    @staticmethod
+    def _top_signal_hits(matched: list[ProfileMatchedItem], limit: int = 5) -> list[str]:
+        counts: Counter[str] = Counter()
+        for row in matched:
+            counts.update(item.lower() for item in row.signal_hits)
         return [value for value, _ in counts.most_common(limit)]
 
     def _fallback_topic_name(self, profile_name: str, matched: list[ProfileMatchedItem]) -> str:

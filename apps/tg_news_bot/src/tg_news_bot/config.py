@@ -158,6 +158,42 @@ class TrendDiscoverySettings(BaseModel):
         return mode
 
 
+class InternetScoringSettings(BaseModel):
+    enabled: bool = True
+    lookback_hours: int = Field(48, ge=1, le=720)
+    max_signal_keywords: int = Field(120, ge=10, le=2000)
+    max_signal_matches_per_item: int = Field(8, ge=1, le=32)
+    signal_keyword_multiplier: float = Field(0.35, ge=0.0, le=5.0)
+    max_signal_boost_per_keyword: float = Field(0.8, ge=0.0, le=5.0)
+    max_total_signal_boost: float = Field(2.5, ge=0.0, le=20.0)
+    db_signal_multiplier: float = Field(0.12, ge=0.0, le=5.0)
+    google_trends_enabled: bool = True
+    google_trends_feeds: list[str] = Field(
+        default_factory=lambda: [
+            "https://trends.google.com/trending/rss?geo=RU",
+        ]
+    )
+    google_trends_top_n: int = Field(40, ge=5, le=300)
+    google_trends_token_weight: float = Field(0.2, ge=0.0, le=2.0)
+    wordstat_keyword_boosts: dict[str, float] = Field(default_factory=dict)
+    seed_hit_weight: float = Field(1.25, ge=0.0, le=10.0)
+    exclude_hit_penalty: float = Field(1.5, ge=0.0, le=10.0)
+    trusted_domain_bonus: float = Field(0.7, ge=0.0, le=5.0)
+    source_trust_multiplier: float = Field(0.12, ge=0.0, le=2.0)
+    source_trust_boost_cap: float = Field(1.0, ge=0.0, le=10.0)
+    default_source_weight: float = Field(0.7, ge=-5.0, le=10.0)
+    source_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "ARXIV": 1.25,
+            "HN": 1.0,
+            "REDDIT": 0.9,
+            "X": 0.8,
+            "GOOGLE_TRENDS": 1.1,
+            "WORDSTAT": 1.0,
+        }
+    )
+
+
 class SourceQualitySettings(BaseModel):
     enabled: bool = True
     auto_disable_enabled: bool = True
@@ -351,6 +387,7 @@ class Settings(BaseSettings):
     scoring: ScoringSettings = ScoringSettings()
     trends: TrendsSettings = TrendsSettings()
     trend_discovery: TrendDiscoverySettings = TrendDiscoverySettings()
+    internet_scoring: InternetScoringSettings = InternetScoringSettings()
     source_quality: SourceQualitySettings = SourceQualitySettings()
     semantic_dedup: SemanticDedupSettings = SemanticDedupSettings()
     content_safety: ContentSafetySettings = ContentSafetySettings()

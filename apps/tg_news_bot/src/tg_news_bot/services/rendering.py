@@ -269,6 +269,15 @@ def _extract_hashtags(
                 break
 
     reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+    manual_hashtags = reasons.get("manual_hashtags")
+    if isinstance(manual_hashtags, list):
+        for item in manual_hashtags:
+            add_variants(str(item).lstrip("#"))
+            if len(tags) >= limit:
+                return tags[:limit]
+        # If editor explicitly set manual hashtags, do not mix with auto keywords.
+        return tags[:limit]
+
     auto_hashtags = reasons.get("auto_hashtags")
     if isinstance(auto_hashtags, list):
         for item in auto_hashtags:

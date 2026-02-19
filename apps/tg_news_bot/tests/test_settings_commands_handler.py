@@ -145,6 +145,8 @@ async def test_commands_help_contains_syntax_lines() -> None:
     assert "/process_range <from_id> <to_id>" in text
     assert "/scheduled_failed_list [limit]" in text
     assert "/analytics [hours]" in text
+    assert "/trend_theme_add <name>|<seed_csv>" in text
+    assert "/trend_theme_list [all]" in text
     assert "/cancel" in text
     assert "Синтаксис:" in text
     assert "Что делает:" in text
