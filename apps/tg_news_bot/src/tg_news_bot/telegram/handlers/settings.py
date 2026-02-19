@@ -573,7 +573,7 @@ def create_settings_router(context: SettingsContext) -> Router:
         return discovered
 
     def render_commands_help_pages() -> list[str]:
-        page_limit = 3500
+        page_limit = 3400
 
         def render_command_lines(name: str) -> list[str]:
             meta = command_meta.get(name, {})
@@ -590,6 +590,54 @@ def create_settings_router(context: SettingsContext) -> Router:
             if example:
                 lines.append(f"  Пример: {example}")
             return lines
+
+        def split_long_block(block: str) -> list[str]:
+            compact = block.strip()
+            if len(compact) <= page_limit:
+                return [compact] if compact else []
+
+            paragraphs = [item.strip() for item in compact.split("\n\n") if item.strip()]
+            chunks: list[str] = []
+            current_chunk = ""
+
+            def flush_chunk() -> None:
+                nonlocal current_chunk
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = ""
+
+            for paragraph in paragraphs:
+                candidate = paragraph if not current_chunk else f"{current_chunk}\n\n{paragraph}"
+                if len(candidate) <= page_limit:
+                    current_chunk = candidate
+                    continue
+
+                flush_chunk()
+                if len(paragraph) <= page_limit:
+                    current_chunk = paragraph
+                    continue
+
+                # Extremely large paragraph: split by lines.
+                lines = [item.rstrip() for item in paragraph.splitlines() if item.strip()]
+                for line in lines:
+                    line_candidate = line if not current_chunk else f"{current_chunk}\n{line}"
+                    if len(line_candidate) <= page_limit:
+                        current_chunk = line_candidate
+                        continue
+                    flush_chunk()
+                    if len(line) <= page_limit:
+                        current_chunk = line
+                    else:
+                        # Hard split as last resort for single overlong line.
+                        start = 0
+                        while start < len(line):
+                            end = start + page_limit
+                            chunks.append(line[start:end])
+                            start = end
+                        current_chunk = ""
+
+            flush_chunk()
+            return chunks
 
         discovered = _discover_router_commands()
         for extra in (*command_meta.keys(), "cancel"):
@@ -629,12 +677,16 @@ def create_settings_router(context: SettingsContext) -> Router:
             )
         )
 
+        expanded_blocks: list[str] = []
+        for block in blocks:
+            expanded_blocks.extend(split_long_block(block))
+
         pages: list[str] = []
         current = (
             "У каждой команды указан правильный синтаксис и назначение.\n"
             "Справка может приходить несколькими сообщениями."
         )
-        for block in blocks:
+        for block in expanded_blocks:
             separator = "\n\n"
             candidate = f"{current}{separator}{block}".strip()
             if len(candidate) <= page_limit:

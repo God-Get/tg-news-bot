@@ -155,6 +155,23 @@ async def test_commands_help_contains_syntax_lines() -> None:
 
 
 @pytest.mark.asyncio
+async def test_commands_help_pages_are_within_safe_telegram_size() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    _, handler = _router_and_handler_by_name(
+        "commands_help",
+        publisher=publisher,
+        ingestion=ingestion,
+    )
+
+    await handler(_Message())
+
+    assert publisher.sent
+    for item in publisher.sent:
+        assert len(item["text"]) <= 3900
+
+
+@pytest.mark.asyncio
 async def test_commands_help_lists_all_router_commands() -> None:
     publisher = _PublisherSpy()
     ingestion = _IngestionRunnerSpy()
