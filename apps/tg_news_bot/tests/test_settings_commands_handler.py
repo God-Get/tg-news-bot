@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -79,6 +80,48 @@ class _TrendDiscoverySpy:
 
 
 @dataclass
+class _AutoPlanSpy:
+    rules: object = field(
+        default_factory=lambda: SimpleNamespace(
+            timezone_name="UTC",
+            min_gap_minutes=90,
+            max_posts_per_day=6,
+            quiet_start_hour=23,
+            quiet_end_hour=8,
+            slot_step_minutes=30,
+            horizon_hours=24,
+        )
+    )
+    preview_result: object | None = None
+    apply_result: object | None = None
+    preview_calls: list[dict] = field(default_factory=list)
+    apply_calls: list[dict] = field(default_factory=list)
+    set_rules_calls: list[object] = field(default_factory=list)
+
+    async def get_rules(self):  # noqa: ANN001
+        return self.rules
+
+    async def set_rules(self, rules):  # noqa: ANN001
+        self.rules = rules
+        self.set_rules_calls.append(rules)
+        return rules
+
+    async def preview(self, *, hours=None, limit=None):  # noqa: ANN001
+        self.preview_calls.append({"hours": hours, "limit": limit})
+        return self.preview_result
+
+    async def apply(self, *, user_id: int, hours=None, limit=None):  # noqa: ANN001
+        self.apply_calls.append(
+            {
+                "user_id": user_id,
+                "hours": hours,
+                "limit": limit,
+            }
+        )
+        return self.apply_result
+
+
+@dataclass
 class _Message:
     user_id: int = 10
     chat_id: int = -1001
@@ -97,12 +140,64 @@ class _Message:
         return self.topic_id
 
 
+class _DummySession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001
+        return False
+
+    def begin(self):
+        return self
+
+    async def flush(self) -> None:
+        return None
+
+
+def _dummy_session_factory():
+    return _DummySession()
+
+
+@dataclass
+class _SourceRepositorySpy:
+    rows: list[object] = field(default_factory=list)
+    by_id: dict[int, object] = field(default_factory=dict)
+
+    async def list_all(self, session):  # noqa: ANN001
+        return list(self.rows)
+
+    async def get_by_id(self, session, source_id: int):  # noqa: ANN001
+        return self.by_id.get(source_id)
+
+
+@dataclass
+class _ScheduledRepoSpy:
+    rows: list[object] = field(default_factory=list)
+    calls: list[dict] = field(default_factory=list)
+
+    async def list_upcoming(self, session, *, now, until=None, limit=50):  # noqa: ANN001
+        self.calls.append({"now": now, "until": until, "limit": limit})
+        return list(self.rows[:limit])
+
+
+@dataclass
+class _DraftRepoSpy:
+    by_id: dict[int, object] = field(default_factory=dict)
+
+    async def get(self, session, draft_id: int):  # noqa: ANN001
+        return self.by_id.get(draft_id)
+
+
 def _router_and_handler_by_name(
     name: str,
     *,
     publisher: _PublisherSpy,
     ingestion: _IngestionRunnerSpy,
     trend_discovery: _TrendDiscoverySpy | None = None,
+    autoplan: _AutoPlanSpy | None = None,
+    scheduled_repo=None,  # noqa: ANN001
+    draft_repo=None,  # noqa: ANN001
+    session_factory=None,  # noqa: ANN001
 ):
     context = SettingsContext(
         settings=SimpleNamespace(
@@ -110,14 +205,19 @@ def _router_and_handler_by_name(
             trend_discovery=SimpleNamespace(default_window_hours=24, mode="suggest"),
             analytics=SimpleNamespace(default_window_hours=24, max_window_hours=240),
             post_formatting=SimpleNamespace(hashtag_mode="both"),
+            scheduler=SimpleNamespace(timezone="UTC"),
+            internet_scoring=SimpleNamespace(enabled=True),
         ),
-        session_factory=SimpleNamespace(),
+        session_factory=session_factory or SimpleNamespace(),
         repository=SimpleNamespace(),
         source_repository=SimpleNamespace(),
         publisher=publisher,
         ingestion_runner=ingestion,
         workflow=SimpleNamespace(),
         trend_discovery=trend_discovery,
+        autoplan=autoplan,
+        scheduled_repo=scheduled_repo,
+        draft_repo=draft_repo,
     )
     router = create_settings_router(context)
     for handler in router.message.handlers:
@@ -144,6 +244,11 @@ async def test_commands_help_contains_syntax_lines() -> None:
     assert "/ingest_url <article_url> [source_id]" in text
     assert "/process_range <from_id> <to_id>" in text
     assert "/scheduled_failed_list [limit]" in text
+    assert "/schedule_map [hours] [limit]" in text
+    assert "/autoplan_rules" in text
+    assert "/set_autoplan_rules <min_gap_minutes> <max_posts_per_day>" in text
+    assert "/autoplan_preview [hours] [limit]" in text
+    assert "/autoplan_apply [hours] [limit]" in text
     assert "/analytics [hours]" in text
     assert "/trend_scan [hours] [limit]" in text
     assert "/trend_profile_add <name>|<seed_csv>" in text
@@ -364,3 +469,312 @@ async def test_trend_ingest_forwards_candidate_to_service() -> None:
 
     assert trend_discovery.ingest_calls == [42]
     assert publisher.sent[-1]["text"] == "ingested 42"
+
+
+@pytest.mark.asyncio
+async def test_list_sources_splits_large_response_into_pages() -> None:
+    publisher = _PublisherSpy()
+    rows = []
+    for idx in range(1, 180):
+        rows.append(
+            SimpleNamespace(
+                id=idx,
+                enabled=bool(idx % 2),
+                trust_score=idx / 100.0,
+                name=f"Source {idx} {'x' * 30}",
+                url=f"https://example.com/feeds/{idx}/{'y' * 40}",
+                tags={
+                    "topics": ["ai", "science", "space"],
+                    "allow_insecure_ssl": bool(idx % 3 == 0),
+                    "quality": {"events_total": idx * 2},
+                },
+            )
+        )
+
+    context = SettingsContext(
+        settings=SimpleNamespace(
+            admin_user_id=10,
+            trend_discovery=SimpleNamespace(default_window_hours=24, mode="suggest"),
+            analytics=SimpleNamespace(default_window_hours=24, max_window_hours=240),
+            post_formatting=SimpleNamespace(hashtag_mode="both"),
+        ),
+        session_factory=_dummy_session_factory,
+        repository=SimpleNamespace(),
+        source_repository=_SourceRepositorySpy(rows),
+        publisher=publisher,
+        ingestion_runner=_IngestionRunnerSpy(),
+        workflow=SimpleNamespace(),
+    )
+    router = create_settings_router(context)
+    handler = None
+    for item in router.message.handlers:
+        if item.callback.__name__ == "list_sources":
+            handler = item.callback
+            break
+    assert handler is not None
+
+    await handler(_Message())
+
+    assert len(publisher.sent) >= 2
+    assert publisher.sent[0]["text"].startswith("Источники:")
+    for sent in publisher.sent:
+        assert len(sent["text"]) <= 3500
+
+
+@pytest.mark.asyncio
+async def test_enable_source_accepts_comma_and_space_separated_ids() -> None:
+    publisher = _PublisherSpy()
+    source_1 = SimpleNamespace(id=1, enabled=False)
+    source_2 = SimpleNamespace(id=2, enabled=False)
+    source_5 = SimpleNamespace(id=5, enabled=False)
+
+    context = SettingsContext(
+        settings=SimpleNamespace(
+            admin_user_id=10,
+            trend_discovery=SimpleNamespace(default_window_hours=24, mode="suggest"),
+            analytics=SimpleNamespace(default_window_hours=24, max_window_hours=240),
+            post_formatting=SimpleNamespace(hashtag_mode="both"),
+        ),
+        session_factory=_dummy_session_factory,
+        repository=SimpleNamespace(),
+        source_repository=_SourceRepositorySpy(
+            by_id={1: source_1, 2: source_2, 5: source_5}
+        ),
+        publisher=publisher,
+        ingestion_runner=_IngestionRunnerSpy(),
+        workflow=SimpleNamespace(),
+    )
+    router = create_settings_router(context)
+    handler = None
+    for item in router.message.handlers:
+        if item.callback.__name__ == "enable_source":
+            handler = item.callback
+            break
+    assert handler is not None
+
+    await handler(_Message(), SimpleNamespace(args="1, 2 5,999"))
+
+    assert source_1.enabled is True
+    assert source_2.enabled is True
+    assert source_5.enabled is True
+    assert publisher.sent
+    assert "Включено источников: 3" in publisher.sent[-1]["text"]
+    assert "ID: #1, #2, #5" in publisher.sent[-1]["text"]
+    assert "Не найдены: #999" in publisher.sent[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_enable_source_rejects_invalid_list() -> None:
+    publisher = _PublisherSpy()
+    context = SettingsContext(
+        settings=SimpleNamespace(
+            admin_user_id=10,
+            trend_discovery=SimpleNamespace(default_window_hours=24, mode="suggest"),
+            analytics=SimpleNamespace(default_window_hours=24, max_window_hours=240),
+            post_formatting=SimpleNamespace(hashtag_mode="both"),
+        ),
+        session_factory=_dummy_session_factory,
+        repository=SimpleNamespace(),
+        source_repository=_SourceRepositorySpy(),
+        publisher=publisher,
+        ingestion_runner=_IngestionRunnerSpy(),
+        workflow=SimpleNamespace(),
+    )
+    router = create_settings_router(context)
+    handler = None
+    for item in router.message.handlers:
+        if item.callback.__name__ == "enable_source":
+            handler = item.callback
+            break
+    assert handler is not None
+
+    await handler(_Message(), SimpleNamespace(args="1,abc"))
+
+    assert publisher.sent
+    assert "source_id должны быть числами" in publisher.sent[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_schedule_map_renders_upcoming_publications() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    scheduled_repo = _ScheduledRepoSpy(
+        rows=[
+            SimpleNamespace(
+                draft_id=205,
+                schedule_at=datetime(2026, 2, 20, 20, 0, tzinfo=timezone.utc),
+            ),
+            SimpleNamespace(
+                draft_id=175,
+                schedule_at=datetime(2026, 2, 20, 21, 30, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    draft_repo = _DraftRepoSpy(
+        by_id={
+            205: SimpleNamespace(
+                id=205,
+                state=SimpleNamespace(value="SCHEDULED"),
+                score=10.48,
+                title_en="NVIDIA launches new AI infra program",
+            ),
+            175: SimpleNamespace(
+                id=175,
+                state=SimpleNamespace(value="SCHEDULED"),
+                score=8.98,
+                title_en="Extreme heat increases strength of pure metals",
+            ),
+        }
+    )
+    _, handler = _router_and_handler_by_name(
+        "schedule_map",
+        publisher=publisher,
+        ingestion=ingestion,
+        scheduled_repo=scheduled_repo,
+        draft_repo=draft_repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    await handler(_Message(), SimpleNamespace(args="24 10"))
+
+    assert scheduled_repo.calls
+    assert scheduled_repo.calls[0]["limit"] == 10
+    assert publisher.sent
+    text = "\n".join(item["text"] for item in publisher.sent)
+    assert "Карта публикаций" in text
+    assert "Draft #205" in text
+    assert "Draft #175" in text
+
+
+@pytest.mark.asyncio
+async def test_schedule_map_reports_empty_window() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    scheduled_repo = _ScheduledRepoSpy(rows=[])
+    draft_repo = _DraftRepoSpy()
+    _, handler = _router_and_handler_by_name(
+        "schedule_map",
+        publisher=publisher,
+        ingestion=ingestion,
+        scheduled_repo=scheduled_repo,
+        draft_repo=draft_repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    await handler(_Message(), SimpleNamespace(args="24 10"))
+
+    assert publisher.sent
+    assert "Нет отложенных публикаций" in publisher.sent[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_autoplan_preview_uses_service_and_renders_plan() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    autoplan = _AutoPlanSpy(
+        preview_result=SimpleNamespace(
+            window_hours=24,
+            rules=SimpleNamespace(
+                timezone_name="UTC",
+                min_gap_minutes=120,
+                max_posts_per_day=6,
+                quiet_start_hour=23,
+                quiet_end_hour=8,
+                slot_step_minutes=30,
+            ),
+            considered_count=3,
+            scheduled=[
+                SimpleNamespace(
+                    draft_id=55,
+                    schedule_at=datetime(2026, 2, 20, 12, 0, tzinfo=timezone.utc),
+                    priority=7.4,
+                )
+            ],
+            unscheduled=[56],
+        )
+    )
+    _, handler = _router_and_handler_by_name(
+        "autoplan_preview",
+        publisher=publisher,
+        ingestion=ingestion,
+        autoplan=autoplan,
+    )
+
+    await handler(_Message(), SimpleNamespace(args="24 5"))
+
+    assert autoplan.preview_calls == [{"hours": 24, "limit": 5}]
+    assert publisher.sent
+    rendered = "\n".join(item["text"] for item in publisher.sent)
+    assert "Smart Scheduler preview" in rendered
+    assert "Draft #55" in rendered
+
+
+@pytest.mark.asyncio
+async def test_set_autoplan_rules_updates_service() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    autoplan = _AutoPlanSpy()
+    _, handler = _router_and_handler_by_name(
+        "set_autoplan_rules",
+        publisher=publisher,
+        ingestion=ingestion,
+        autoplan=autoplan,
+    )
+
+    await handler(_Message(), SimpleNamespace(args="120 6 23 8 30 24"))
+
+    assert len(autoplan.set_rules_calls) == 1
+    saved = autoplan.set_rules_calls[0]
+    assert saved.min_gap_minutes == 120
+    assert saved.max_posts_per_day == 6
+    assert saved.quiet_start_hour == 23
+    assert saved.quiet_end_hour == 8
+    assert saved.slot_step_minutes == 30
+    assert saved.horizon_hours == 24
+    assert publisher.sent
+    assert "Правила Smart Scheduler обновлены" in publisher.sent[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_autoplan_apply_forwards_to_service() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    autoplan = _AutoPlanSpy(
+        apply_result=SimpleNamespace(
+            preview=SimpleNamespace(
+                window_hours=24,
+                considered_count=4,
+                scheduled=[
+                    SimpleNamespace(
+                        draft_id=71,
+                        schedule_at=datetime(2026, 2, 20, 12, 0, tzinfo=timezone.utc),
+                        priority=7.1,
+                    )
+                ],
+                unscheduled=[72],
+                rules=SimpleNamespace(
+                    timezone_name="UTC",
+                    min_gap_minutes=90,
+                    max_posts_per_day=6,
+                    quiet_start_hour=23,
+                    quiet_end_hour=8,
+                    slot_step_minutes=30,
+                ),
+            ),
+            scheduled_count=1,
+            failed_drafts=[],
+        )
+    )
+    _, handler = _router_and_handler_by_name(
+        "autoplan_apply",
+        publisher=publisher,
+        ingestion=ingestion,
+        autoplan=autoplan,
+    )
+
+    await handler(_Message(), SimpleNamespace(args="12 3"))
+
+    assert autoplan.apply_calls == [{"user_id": 10, "hours": 12, "limit": 3}]
+    assert publisher.sent
+    assert "Запускаю Smart Scheduler apply" in publisher.sent[0]["text"]
+    assert "Успешно переведено в SCHEDULED: 1" in publisher.sent[1]["text"]

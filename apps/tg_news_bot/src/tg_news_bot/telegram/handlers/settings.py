@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import re
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import feedparser
 from httpx import AsyncClient
@@ -25,6 +27,11 @@ from tg_news_bot.repositories.trend_topic_profiles import (
     TrendTopicProfileRepository,
 )
 from tg_news_bot.services.analytics import AnalyticsService
+from tg_news_bot.services.autoplan import (
+    AutoPlanRules,
+    AutoPlanService,
+    render_rules,
+)
 from tg_news_bot.services.ingestion import IngestionRunner, IngestionStats
 from tg_news_bot.services.trend_discovery import TrendDiscoveryService
 from tg_news_bot.services.trends import TrendCollector
@@ -49,6 +56,7 @@ class SettingsContext:
     scheduled_repo: ScheduledPostRepository | None = None
     draft_repo: DraftRepository | None = None
     analytics: AnalyticsService | None = None
+    autoplan: AutoPlanService | None = None
 
 
 def parse_source_args(raw_args: str) -> tuple[str, str]:
@@ -89,6 +97,7 @@ def parse_source_batch_args(raw_args: str) -> list[tuple[str, str]]:
 
 def create_settings_router(context: SettingsContext) -> Router:
     router = Router()
+    telegram_page_limit = 3500
     command_meta = {
         "commands": {
             "syntax": "/commands",
@@ -194,10 +203,10 @@ def create_settings_router(context: SettingsContext) -> Router:
             "example": "/set_source_ssl_insecure 3 on",
         },
         "enable_source": {
-            "syntax": "/enable_source <source_id>",
-            "description": "Включает источник для регулярного RSS-поллинга.",
+            "syntax": "/enable_source <source_id[,source_id...]>",
+            "description": "Включает один или несколько источников для регулярного RSS-поллинга.",
             "where": "Обычно #General.",
-            "example": "/enable_source 3",
+            "example": "/enable_source 3,6,9",
         },
         "disable_source": {
             "syntax": "/disable_source <source_id>",
@@ -257,6 +266,35 @@ def create_settings_router(context: SettingsContext) -> Router:
             "description": "Отменяет scheduled-задачу и возвращает draft в READY.",
             "where": "Обычно #General.",
             "example": "/scheduled_cancel 132",
+        },
+        "schedule_map": {
+            "syntax": "/schedule_map [hours] [limit]",
+            "description": "Показывает карту отложенных публикаций: какой draft и в какое время выйдет.",
+            "where": "Обычно #General.",
+            "example": "/schedule_map 48 30",
+        },
+        "autoplan_rules": {
+            "syntax": "/autoplan_rules",
+            "description": "Показывает текущие правила Smart Scheduler (автопланирование публикаций).",
+            "where": "Обычно #General.",
+        },
+        "set_autoplan_rules": {
+            "syntax": "/set_autoplan_rules <min_gap_minutes> <max_posts_per_day> <quiet_start_hour> <quiet_end_hour> [slot_step_minutes] [horizon_hours]",
+            "description": "Обновляет правила Smart Scheduler (интервал, лимит в день, quiet hours, шаг слотов, горизонт).",
+            "where": "Обычно #General.",
+            "example": "/set_autoplan_rules 120 6 23 8 30 24",
+        },
+        "autoplan_preview": {
+            "syntax": "/autoplan_preview [hours] [limit]",
+            "description": "Строит предварительный автоплан для READY draft без применения.",
+            "where": "Обычно #General.",
+            "example": "/autoplan_preview 24 8",
+        },
+        "autoplan_apply": {
+            "syntax": "/autoplan_apply [hours] [limit]",
+            "description": "Применяет Smart Scheduler: переводит READY draft в SCHEDULED по рассчитанным слотам.",
+            "where": "Обычно #General.",
+            "example": "/autoplan_apply 24 8",
         },
         "collect_trends": {
             "syntax": "/collect_trends",
@@ -403,6 +441,11 @@ def create_settings_router(context: SettingsContext) -> Router:
             "scheduled_failed_list",
             "scheduled_retry",
             "scheduled_cancel",
+            "schedule_map",
+            "autoplan_rules",
+            "set_autoplan_rules",
+            "autoplan_preview",
+            "autoplan_apply",
             "collect_trends",
             "trends",
             "trend_scan",
@@ -427,6 +470,19 @@ def create_settings_router(context: SettingsContext) -> Router:
     scheduled_repo = context.scheduled_repo or ScheduledPostRepository()
     draft_repo = context.draft_repo or DraftRepository()
     analytics_service = context.analytics or AnalyticsService(context.session_factory)
+    scheduler_timezone = (
+        getattr(getattr(context.settings, "scheduler", None), "timezone", None) or "UTC"
+    )
+    autoplan_service = context.autoplan or (
+        AutoPlanService(
+            session_factory=context.session_factory,
+            timezone_name=scheduler_timezone,
+            workflow=context.workflow,
+            settings_repo=context.repository,
+        )
+        if context.workflow is not None
+        else None
+    )
     trend_profiles_repo = TrendTopicProfileRepository()
     trend_status_labels = {
         "PENDING": "ожидает",
@@ -497,6 +553,28 @@ def create_settings_router(context: SettingsContext) -> Router:
         if value <= 0:
             return None
         return value
+
+    def parse_source_ids(raw: str | None) -> list[int] | None:
+        if raw is None:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        source_ids: list[int] = []
+        seen: set[int] = set()
+        for token in re.split(r"[\s,;]+", text):
+            candidate = token.strip()
+            if not candidate:
+                continue
+            if not candidate.isdigit():
+                return None
+            value = int(candidate)
+            if value <= 0:
+                return None
+            if value not in seen:
+                seen.add(value)
+                source_ids.append(value)
+        return source_ids if source_ids else None
 
     def parse_non_negative_float(raw: str | None) -> float | None:
         if raw is None:
@@ -580,6 +658,41 @@ def create_settings_router(context: SettingsContext) -> Router:
                 return None
             return first, second
         return None
+
+    def parse_hour(raw: str | None) -> int | None:
+        if raw is None:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        if not text.isdigit():
+            return None
+        value = int(text)
+        if value < 0 or value > 23:
+            return None
+        return value
+
+    def parse_optional_hours_limit(raw: str | None) -> tuple[int | None, int | None] | None:
+        if raw is None:
+            return None, None
+        parts = raw.strip().split()
+        if not parts:
+            return None, None
+        if len(parts) > 2:
+            return None
+        hours: int | None = None
+        limit: int | None = None
+        if len(parts) >= 1:
+            parsed_hours = parse_positive_int(parts[0])
+            if parsed_hours is None:
+                return None
+            hours = parsed_hours
+        if len(parts) == 2:
+            parsed_limit = parse_positive_int(parts[1])
+            if parsed_limit is None:
+                return None
+            limit = parsed_limit
+        return hours, limit
 
     def _discover_router_commands() -> list[str]:
         discovered: list[str] = []
@@ -749,6 +862,86 @@ def create_settings_router(context: SettingsContext) -> Router:
             f"Ошибки загрузки RSS: {stats.rss_fetch_errors}",
         ]
         return "\n".join(lines)
+
+    def render_autoplan_preview(*, title: str, result) -> str:  # noqa: ANN001
+        lines = [
+            title,
+            f"Окно планирования: {result.window_hours}ч",
+            (
+                "Правила: "
+                f"gap={result.rules.min_gap_minutes}м, "
+                f"max/day={result.rules.max_posts_per_day}, "
+                f"quiet={result.rules.quiet_start_hour:02d}:00-{result.rules.quiet_end_hour:02d}:00, "
+                f"step={result.rules.slot_step_minutes}м, "
+                f"tz={result.rules.timezone_name}"
+            ),
+            f"Рассмотрено READY: {result.considered_count}",
+            f"Назначено слотов: {len(result.scheduled)}",
+            f"Без слота: {len(result.unscheduled)}",
+        ]
+        if result.scheduled:
+            lines.append("")
+            lines.append("План:")
+            local_tz = ZoneInfo(result.rules.timezone_name)
+            for item in result.scheduled:
+                local_time = item.schedule_at.astimezone(local_tz)
+                lines.append(
+                    f"Draft #{item.draft_id} -> {local_time:%d.%m %H:%M} "
+                    f"({result.rules.timezone_name}) priority={item.priority:.2f}"
+                )
+        if result.unscheduled:
+            lines.append("")
+            lines.append(
+                "Не удалось назначить слот: "
+                + ", ".join(f"#{draft_id}" for draft_id in result.unscheduled[:20])
+            )
+            if len(result.unscheduled) > 20:
+                lines.append(f"... ещё {len(result.unscheduled) - 20}")
+        return "\n".join(lines)
+
+    def split_text_pages(text: str, *, page_limit: int = telegram_page_limit) -> list[str]:
+        compact = text.strip()
+        if not compact:
+            return []
+        if len(compact) <= page_limit:
+            return [compact]
+
+        pages: list[str] = []
+        current = ""
+        for raw_line in compact.splitlines():
+            line = raw_line.rstrip()
+            if len(line) > page_limit:
+                if current:
+                    pages.append(current)
+                    current = ""
+                start = 0
+                while start < len(line):
+                    end = start + page_limit
+                    pages.append(line[start:end])
+                    start = end
+                continue
+
+            candidate = line if not current else f"{current}\n{line}"
+            if len(candidate) <= page_limit:
+                current = candidate
+            else:
+                pages.append(current)
+                current = line
+
+        if current:
+            pages.append(current)
+        return pages
+
+    async def send_paged_text(*, chat_id: int, topic_id: int | None, text: str) -> None:
+        pages = split_text_pages(text)
+        if not pages:
+            return
+        for page in pages:
+            await context.publisher.send_text(
+                chat_id=chat_id,
+                topic_id=topic_id,
+                text=page,
+            )
 
     async def validate_rss_url(url: str) -> tuple[bool, str]:
         try:
@@ -1098,9 +1291,15 @@ def create_settings_router(context: SettingsContext) -> Router:
         sources_total = 0
         enabled_total = 0
         avg_trust = 0.0
+        autoplan_payload: dict | None = None
         async with context.session_factory() as session:
             async with session.begin():
                 bot_settings = await context.repository.get_or_create(session)
+                autoplan_payload = (
+                    bot_settings.autoplan_rules
+                    if isinstance(bot_settings.autoplan_rules, dict)
+                    else None
+                )
                 sources = await context.source_repository.list_all(session)
                 sources_total = len(sources)
                 enabled_total = sum(1 for item in sources if item.enabled)
@@ -1124,6 +1323,10 @@ def create_settings_router(context: SettingsContext) -> Router:
             f"trend_discovery_mode: {context.settings.trend_discovery.mode}",
             f"internet_scoring_enabled: {context.settings.internet_scoring.enabled}",
         ]
+        if autoplan_payload:
+            lines.append(f"autoplan_rules: {autoplan_payload}")
+        else:
+            lines.append("autoplan_rules: <default>")
         await context.publisher.send_text(
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
@@ -1317,7 +1520,7 @@ def create_settings_router(context: SettingsContext) -> Router:
                 quality = item.tags.get("quality")
                 if isinstance(quality, dict):
                     lines.append(f"quality_events: {quality.get('events_total', 0)}")
-        await context.publisher.send_text(
+        await send_paged_text(
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             text="\n".join(lines),
@@ -1494,34 +1697,48 @@ def create_settings_router(context: SettingsContext) -> Router:
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Формат: /enable_source <source_id>",
+                text="Формат: /enable_source <source_id[,source_id...]>",
             )
             return
-        try:
-            source_id = int(command.args.strip())
-        except ValueError:
+        source_ids = parse_source_ids(command.args)
+        if not source_ids:
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="source_id должен быть числом.",
+                text="source_id должны быть числами (через запятую или пробел).",
             )
             return
+
+        enabled_ids: list[int] = []
+        missing_ids: list[int] = []
         async with context.session_factory() as session:
             async with session.begin():
-                source = await context.source_repository.get_by_id(session, source_id)
-                if not source:
-                    await context.publisher.send_text(
-                        chat_id=message.chat.id,
-                        topic_id=message.message_thread_id,
-                        text=f"Источник #{source_id} не найден.",
-                    )
-                    return
-                source.enabled = True
+                for source_id in source_ids:
+                    source = await context.source_repository.get_by_id(session, source_id)
+                    if not source:
+                        missing_ids.append(source_id)
+                        continue
+                    source.enabled = True
+                    enabled_ids.append(source_id)
                 await session.flush()
+
+        result_lines: list[str] = []
+        if enabled_ids:
+            result_lines.append(f"Включено источников: {len(enabled_ids)}")
+            result_lines.append(
+                "ID: " + ", ".join(f"#{source_id}" for source_id in enabled_ids)
+            )
+        if missing_ids:
+            result_lines.append(
+                "Не найдены: " + ", ".join(f"#{source_id}" for source_id in missing_ids)
+            )
+        if not result_lines:
+            result_lines.append("Изменений нет.")
+
         await context.publisher.send_text(
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
-            text=f"Источник #{source_id} включён.",
+            text="\n".join(result_lines),
         )
 
     @router.message(Command("disable_source"))
@@ -2052,6 +2269,278 @@ def create_settings_router(context: SettingsContext) -> Router:
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             text=f"Scheduled задача Draft #{draft_id} отменена.",
+        )
+
+    @router.message(Command("schedule_map"))
+    async def schedule_map(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        parsed = parse_optional_hours_limit(command.args if command else None)
+        if parsed is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /schedule_map [hours] [limit]",
+            )
+            return
+        hours_raw, limit_raw = parsed
+        hours = min(hours_raw or 48, 336)
+        limit = min(limit_raw or 30, 120)
+        now_utc = datetime.now(timezone.utc)
+        until_utc = now_utc + timedelta(hours=hours)
+        local_tz = ZoneInfo(scheduler_timezone)
+
+        async with context.session_factory() as session:
+            async with session.begin():
+                rows = await scheduled_repo.list_upcoming(
+                    session,
+                    now=now_utc,
+                    until=until_utc,
+                    limit=limit,
+                )
+                if not rows:
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text=f"Нет отложенных публикаций на ближайшие {hours}ч.",
+                    )
+                    return
+
+                lines = [
+                    f"Карта публикаций на {hours}ч (записей: {len(rows)}):",
+                    f"Таймзона: {scheduler_timezone}",
+                ]
+                current_day = ""
+                for item in rows:
+                    draft = await draft_repo.get(session, item.draft_id)
+                    schedule_at = (
+                        item.schedule_at
+                        if item.schedule_at.tzinfo is not None
+                        else item.schedule_at.replace(tzinfo=timezone.utc)
+                    )
+                    local_dt = schedule_at.astimezone(local_tz)
+                    day_label = f"{local_dt:%d.%m.%Y}"
+                    if day_label != current_day:
+                        lines.append("")
+                        lines.append(day_label)
+                        current_day = day_label
+                    draft_state = draft.state.value if draft else "N/A"
+                    draft_score = float(draft.score or 0.0) if draft else 0.0
+                    title = (draft.title_en or "").strip() if draft else ""
+                    if len(title) > 120:
+                        title = f"{title[:117]}..."
+                    lines.append(
+                        f"{local_dt:%H:%M} | Draft #{item.draft_id} | {draft_state} | score={draft_score:.2f}"
+                    )
+                    if title:
+                        lines.append(f"{title}")
+
+        await send_paged_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("autoplan_rules"))
+    async def autoplan_rules(message: Message) -> None:
+        if not is_admin(message):
+            return
+        if autoplan_service is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Smart Scheduler недоступен: workflow не инициализирован.",
+            )
+            return
+        rules = await autoplan_service.get_rules()
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="Текущие правила Smart Scheduler:\n" + render_rules(rules),
+        )
+
+    @router.message(Command("set_autoplan_rules"))
+    async def set_autoplan_rules(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if autoplan_service is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Smart Scheduler недоступен: workflow не инициализирован.",
+            )
+            return
+        raw_parts = command.args.strip().split() if command and command.args else []
+        if len(raw_parts) not in {4, 5, 6}:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=(
+                    "Формат: /set_autoplan_rules "
+                    "<min_gap_minutes> <max_posts_per_day> "
+                    "<quiet_start_hour> <quiet_end_hour> "
+                    "[slot_step_minutes] [horizon_hours]"
+                ),
+            )
+            return
+
+        min_gap = parse_positive_int(raw_parts[0])
+        max_per_day = parse_positive_int(raw_parts[1])
+        quiet_start = parse_hour(raw_parts[2])
+        quiet_end = parse_hour(raw_parts[3])
+        step_minutes = parse_positive_int(raw_parts[4]) if len(raw_parts) >= 5 else None
+        horizon_hours = parse_positive_int(raw_parts[5]) if len(raw_parts) >= 6 else None
+
+        if (
+            min_gap is None
+            or max_per_day is None
+            or quiet_start is None
+            or quiet_end is None
+            or (len(raw_parts) >= 5 and step_minutes is None)
+            or (len(raw_parts) >= 6 and horizon_hours is None)
+        ):
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=(
+                    "Неверные параметры. "
+                    "Пример: /set_autoplan_rules 120 6 23 8 30 24"
+                ),
+            )
+            return
+
+        current = await autoplan_service.get_rules()
+        updated = AutoPlanRules(
+            timezone_name=current.timezone_name,
+            min_gap_minutes=min(max(min_gap, 10), 24 * 60),
+            max_posts_per_day=min(max(max_per_day, 1), 24),
+            quiet_start_hour=quiet_start,
+            quiet_end_hour=quiet_end,
+            slot_step_minutes=(
+                min(max(step_minutes, 5), 180)
+                if step_minutes is not None
+                else current.slot_step_minutes
+            ),
+            horizon_hours=(
+                min(max(horizon_hours, 1), 168)
+                if horizon_hours is not None
+                else current.horizon_hours
+            ),
+        )
+        await autoplan_service.set_rules(updated)
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="Правила Smart Scheduler обновлены:\n" + render_rules(updated),
+        )
+
+    @router.message(Command("autoplan_preview"))
+    async def autoplan_preview(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if autoplan_service is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Smart Scheduler недоступен: workflow не инициализирован.",
+            )
+            return
+        parsed = parse_optional_hours_limit(command.args if command else None)
+        if parsed is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /autoplan_preview [hours] [limit]",
+            )
+            return
+        hours, limit = parsed
+        try:
+            preview = await autoplan_service.preview(
+                hours=(min(hours, 168) if hours is not None else None),
+                limit=(min(limit, 50) if limit is not None else 10),
+            )
+        except Exception:
+            log.exception("settings.autoplan_preview_failed")
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Ошибка построения Smart Scheduler preview. Смотри логи.",
+            )
+            return
+        await send_paged_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=render_autoplan_preview(
+                title="Smart Scheduler preview",
+                result=preview,
+            ),
+        )
+
+    @router.message(Command("autoplan_apply"))
+    async def autoplan_apply(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+        if autoplan_service is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Smart Scheduler недоступен: workflow не инициализирован.",
+            )
+            return
+        parsed = parse_optional_hours_limit(command.args if command else None)
+        if parsed is None:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Формат: /autoplan_apply [hours] [limit]",
+            )
+            return
+        hours, limit = parsed
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="Запускаю Smart Scheduler apply...",
+        )
+        try:
+            applied = await autoplan_service.apply(
+                user_id=message.from_user.id if message.from_user else 0,
+                hours=(min(hours, 168) if hours is not None else None),
+                limit=(min(limit, 50) if limit is not None else 10),
+            )
+        except Exception:
+            log.exception("settings.autoplan_apply_failed")
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Ошибка применения Smart Scheduler. Смотри логи.",
+            )
+            return
+
+        summary_lines = [
+            "Smart Scheduler apply завершён.",
+            f"Рассмотрено READY: {applied.preview.considered_count}",
+            f"Назначено слотов: {len(applied.preview.scheduled)}",
+            f"Успешно переведено в SCHEDULED: {applied.scheduled_count}",
+            f"Ошибок перехода: {len(applied.failed_drafts)}",
+            f"Без слота: {len(applied.preview.unscheduled)}",
+        ]
+        if applied.failed_drafts:
+            summary_lines.append(
+                "Ошибки Draft: "
+                + ", ".join(f"#{draft_id}" for draft_id in applied.failed_drafts[:20])
+            )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(summary_lines),
+        )
+        await send_paged_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=render_autoplan_preview(
+                title="Smart Scheduler итоговый план",
+                result=applied.preview,
+            ),
         )
 
     @router.message(Command("collect_trends"))

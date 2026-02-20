@@ -118,6 +118,28 @@ class ScheduledPostRepository:
         )
         return list(result.scalars().all())
 
+    async def list_upcoming(
+        self,
+        session: AsyncSession,
+        *,
+        now: datetime,
+        until: datetime | None = None,
+        limit: int = 50,
+    ) -> list[ScheduledPost]:
+        query = (
+            select(ScheduledPost)
+            .where(
+                ScheduledPost.status == ScheduledPostStatus.SCHEDULED,
+                ScheduledPost.schedule_at >= now,
+            )
+            .order_by(ScheduledPost.schedule_at.asc())
+            .limit(limit)
+        )
+        if until is not None:
+            query = query.where(ScheduledPost.schedule_at <= until)
+        result = await session.execute(query)
+        return list(result.scalars().all())
+
     async def retry_now_by_draft(self, session: AsyncSession, *, draft_id: int) -> bool:
         scheduled = await self.get_by_draft(session, draft_id)
         if scheduled is None:

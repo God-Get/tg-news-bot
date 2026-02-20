@@ -96,6 +96,7 @@ class BotSettings(Base):
     archive_topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     trend_candidates_topic_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    autoplan_rules: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
