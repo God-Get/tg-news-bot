@@ -339,6 +339,318 @@ async def test_apply_edit_rolls_back_new_post_if_card_create_fails() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_edit_can_update_manual_hashtags_without_text_rewrite() -> None:
+    draft = Draft(
+        id=4,
+        state=DraftState.EDITING,
+        normalized_url="https://example.com/article4",
+        domain="example.com",
+        title_en="Title",
+        post_text_ru="Existing title\n\nExisting body",
+        score_reasons={"manual_hashtags": ["#old"]},
+        tg_image_file_id="photo-file-id",
+        has_image=True,
+        group_chat_id=-1001,
+        topic_id=12,
+        post_message_id=501,
+        card_message_id=502,
+    )
+    settings_repo = _SettingsRepo(BotSettings(group_chat_id=-1001, editing_topic_id=12))
+    draft_repo = _DraftRepo(draft)
+    active_session = EditSession(
+        id=1,
+        draft_id=4,
+        group_chat_id=-1001,
+        topic_id=12,
+        user_id=10,
+        instruction_message_id=999,
+        status=EditSessionStatus.ACTIVE,
+        started_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    edit_repo = _EditRepo(sessions=[active_session], next_id=2)
+    publisher = _Publisher()
+    service = EditSessionService(
+        publisher,
+        settings_repo=settings_repo,
+        draft_repo=draft_repo,
+        edit_repo=edit_repo,
+    )
+    session = _Session()
+
+    result = await service.apply_edit(
+        session,
+        EditPayload(
+            chat_id=-1001,
+            topic_id=12,
+            user_id=10,
+            message_id=801,
+            text="#AI #Космос",
+            photo_file_id=None,
+            photo_unique_id=None,
+        ),
+    )
+
+    assert result is draft
+    assert draft.post_text_ru == "Existing title\n\nExisting body"
+    assert draft.score_reasons == {"manual_hashtags": ["#ai", "#космос"]}
+    assert publisher.post_edit_calls == 1
+    assert active_session.status == EditSessionStatus.COMPLETED
+    assert 801 in publisher.deleted_message_ids
+
+
+@pytest.mark.asyncio
+async def test_apply_edit_does_not_override_manual_hashtags_from_inline_hashes() -> None:
+    draft = Draft(
+        id=5,
+        state=DraftState.EDITING,
+        normalized_url="https://example.com/article5",
+        domain="example.com",
+        title_en="Title",
+        post_text_ru="Old body",
+        score_reasons={"manual_hashtags": ["#preset"]},
+        group_chat_id=-1001,
+        topic_id=12,
+        post_message_id=601,
+        card_message_id=602,
+    )
+    settings_repo = _SettingsRepo(BotSettings(group_chat_id=-1001, editing_topic_id=12))
+    draft_repo = _DraftRepo(draft)
+    active_session = EditSession(
+        id=1,
+        draft_id=5,
+        group_chat_id=-1001,
+        topic_id=12,
+        user_id=10,
+        instruction_message_id=999,
+        status=EditSessionStatus.ACTIVE,
+        started_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    edit_repo = _EditRepo(sessions=[active_session], next_id=2)
+    publisher = _Publisher()
+    service = EditSessionService(
+        publisher,
+        settings_repo=settings_repo,
+        draft_repo=draft_repo,
+        edit_repo=edit_repo,
+    )
+    session = _Session()
+
+    await service.apply_edit(
+        session,
+        EditPayload(
+            chat_id=-1001,
+            topic_id=12,
+            user_id=10,
+            message_id=802,
+            text="Updated body with #inline hashtag in sentence.",
+            photo_file_id=None,
+            photo_unique_id=None,
+        ),
+    )
+
+    assert draft.post_text_ru == "Updated body with #inline hashtag in sentence."
+    assert draft.score_reasons == {"manual_hashtags": ["#preset"]}
+    assert active_session.status == EditSessionStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_apply_edit_ignores_old_hashtag_line_when_new_line_is_added() -> None:
+    draft = Draft(
+        id=6,
+        state=DraftState.EDITING,
+        normalized_url="https://example.com/article6",
+        domain="example.com",
+        title_en="Title",
+        post_text_ru="Body",
+        score_reasons={"manual_hashtags": ["#ai", "#ии", "#models", "#language", "#data"]},
+        group_chat_id=-1001,
+        topic_id=12,
+        post_message_id=701,
+        card_message_id=702,
+    )
+    settings_repo = _SettingsRepo(BotSettings(group_chat_id=-1001, editing_topic_id=12))
+    draft_repo = _DraftRepo(draft)
+    active_session = EditSession(
+        id=1,
+        draft_id=6,
+        group_chat_id=-1001,
+        topic_id=12,
+        user_id=10,
+        instruction_message_id=999,
+        status=EditSessionStatus.ACTIVE,
+        started_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    edit_repo = _EditRepo(sessions=[active_session], next_id=2)
+    publisher = _Publisher()
+    service = EditSessionService(
+        publisher,
+        settings_repo=settings_repo,
+        draft_repo=draft_repo,
+        edit_repo=edit_repo,
+    )
+    session = _Session()
+
+    await service.apply_edit(
+        session,
+        EditPayload(
+            chat_id=-1001,
+            topic_id=12,
+            user_id=10,
+            message_id=803,
+            text=(
+                "Body\n\n"
+                "#ai #ии #models #language #пчёлы\n"
+                "#ai #ии #models #language #data"
+            ),
+            photo_file_id=None,
+            photo_unique_id=None,
+        ),
+    )
+
+    assert draft.post_text_ru == "Body"
+    assert draft.score_reasons == {
+        "manual_hashtags": ["#ai", "#ии", "#models", "#language", "#пчёлы"]
+    }
+    assert active_session.status == EditSessionStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_apply_edit_accepts_cyrillic_manual_hashtags() -> None:
+    draft = Draft(
+        id=7,
+        state=DraftState.EDITING,
+        normalized_url="https://example.com/article7",
+        domain="example.com",
+        title_en="Title",
+        post_text_ru="Body",
+        score_reasons={"manual_hashtags": ["#ai", "#\u0438\u0438"]},
+        group_chat_id=-1001,
+        topic_id=12,
+        post_message_id=801,
+        card_message_id=802,
+    )
+    settings_repo = _SettingsRepo(BotSettings(group_chat_id=-1001, editing_topic_id=12))
+    draft_repo = _DraftRepo(draft)
+    active_session = EditSession(
+        id=1,
+        draft_id=7,
+        group_chat_id=-1001,
+        topic_id=12,
+        user_id=10,
+        instruction_message_id=999,
+        status=EditSessionStatus.ACTIVE,
+        started_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    edit_repo = _EditRepo(sessions=[active_session], next_id=2)
+    publisher = _Publisher()
+    service = EditSessionService(
+        publisher,
+        settings_repo=settings_repo,
+        draft_repo=draft_repo,
+        edit_repo=edit_repo,
+    )
+    session = _Session()
+
+    await service.apply_edit(
+        session,
+        EditPayload(
+            chat_id=-1001,
+            topic_id=12,
+            user_id=10,
+            message_id=804,
+            text="#science #\u043d\u0430\u0443\u043a\u0430 #space #\u043a\u043e\u0441\u043c\u043e\u0441 #ai #\u0441\u0442\u0430\u043b\u044c",
+            photo_file_id=None,
+            photo_unique_id=None,
+        ),
+    )
+
+    assert draft.score_reasons == {
+        "manual_hashtags": [
+            "#science",
+            "#\u043d\u0430\u0443\u043a\u0430",
+            "#space",
+            "#\u043a\u043e\u0441\u043c\u043e\u0441",
+            "#ai",
+            "#\u0441\u0442\u0430\u043b\u044c",
+        ]
+    }
+    assert active_session.status == EditSessionStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_apply_edit_parses_hashtags_when_source_line_is_last() -> None:
+    draft = Draft(
+        id=8,
+        state=DraftState.EDITING,
+        normalized_url="https://example.com/article8",
+        domain="example.com",
+        title_en="Title",
+        post_text_ru="Body",
+        score_reasons={"manual_hashtags": ["#ai", "#\u0438\u0438", "#models", "#language", "#data"]},
+        group_chat_id=-1001,
+        topic_id=12,
+        post_message_id=901,
+        card_message_id=902,
+    )
+    settings_repo = _SettingsRepo(BotSettings(group_chat_id=-1001, editing_topic_id=12))
+    draft_repo = _DraftRepo(draft)
+    active_session = EditSession(
+        id=1,
+        draft_id=8,
+        group_chat_id=-1001,
+        topic_id=12,
+        user_id=10,
+        instruction_message_id=999,
+        status=EditSessionStatus.ACTIVE,
+        started_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    edit_repo = _EditRepo(sessions=[active_session], next_id=2)
+    publisher = _Publisher()
+    service = EditSessionService(
+        publisher,
+        settings_repo=settings_repo,
+        draft_repo=draft_repo,
+        edit_repo=edit_repo,
+    )
+    session = _Session()
+
+    await service.apply_edit(
+        session,
+        EditPayload(
+            chat_id=-1001,
+            topic_id=12,
+            user_id=10,
+            message_id=805,
+            text=(
+                "Body\n\n"
+                "#science #\u043d\u0430\u0443\u043a\u0430 #space #\u043a\u043e\u0441\u043c\u043e\u0441 #ai #\u0441\u0442\u0430\u043b\u044c\n\n"
+                "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a"
+            ),
+            photo_file_id=None,
+            photo_unique_id=None,
+        ),
+    )
+
+    assert draft.post_text_ru == "Body"
+    assert draft.score_reasons == {
+        "manual_hashtags": [
+            "#science",
+            "#\u043d\u0430\u0443\u043a\u0430",
+            "#space",
+            "#\u043a\u043e\u0441\u043c\u043e\u0441",
+            "#ai",
+            "#\u0441\u0442\u0430\u043b\u044c",
+        ]
+    }
+    assert active_session.status == EditSessionStatus.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_start_ignores_not_modified_for_existing_instruction() -> None:
     draft = Draft(
         id=3,

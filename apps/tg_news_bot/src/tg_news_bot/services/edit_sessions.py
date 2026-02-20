@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +25,13 @@ from tg_news_bot.services.keyboards import build_state_keyboard
 from tg_news_bot.services.metrics import metrics
 from tg_news_bot.services.rendering import render_card_text, render_post_content
 from tg_news_bot.telegram.callbacks import build_callback
+
+_HASHTAG_TOKEN_RE = re.compile(r"^[0-9a-z\u0400-\u04FF_]{2,32}$", re.IGNORECASE)
+_SOURCE_LABEL_RE = re.compile(
+    r"^\s*источник\s*[:(]?\s*(?P<url>https?://\S+)?\s*\)?\s*$",
+    re.IGNORECASE,
+)
+_URL_ONLY_RE = re.compile(r"^\s*https?://\S+\s*$", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -158,8 +166,22 @@ class EditSessionService:
 
         text_updated = False
         if payload.text is not None:
-            draft.post_text_ru = payload.text
-            text_updated = True
+            hashtag_baseline = _extract_existing_hashtags(draft)
+            body_text, hashtags, has_hashtag_block = _split_text_and_manual_hashtags(
+                payload.text,
+                baseline_hashtags=hashtag_baseline,
+                normalized_url=draft.normalized_url,
+            )
+            if body_text:
+                draft.post_text_ru = body_text
+                text_updated = True
+            hashtags_updated = _apply_manual_hashtags(
+                draft,
+                hashtags=hashtags,
+                has_hashtag_block=has_hashtag_block,
+            )
+            if hashtags_updated:
+                text_updated = True
 
         if payload.photo_file_id:
             draft.tg_image_file_id = payload.photo_file_id
@@ -338,3 +360,148 @@ class EditSessionService:
             "\u041f\u0440\u0438\u0448\u043b\u0438\u0442\u0435 \u043d\u043e\u0432\u044b\u0439 \u0442\u0435\u043a\u0441\u0442 \u0438/\u0438\u043b\u0438 \u0444\u043e\u0442\u043e "
             "\u0441 \u043f\u043e\u0434\u043f\u0438\u0441\u044c\u044e. /cancel - \u043e\u0442\u043c\u0435\u043d\u0430."
         )
+
+
+def _split_text_and_manual_hashtags(
+    text: str,
+    *,
+    baseline_hashtags: list[str] | None = None,
+    normalized_url: str | None = None,
+) -> tuple[str, list[str], bool]:
+    lines = text.splitlines()
+    if not lines:
+        return "", [], False
+
+    idx = len(lines) - 1
+    while idx >= 0 and not lines[idx].strip():
+        idx -= 1
+
+    idx_without_source = idx
+    while idx_without_source >= 0:
+        candidate = lines[idx_without_source].strip()
+        if not candidate:
+            idx_without_source -= 1
+            continue
+        if _is_source_tail_line(candidate, normalized_url=normalized_url):
+            idx_without_source -= 1
+            while idx_without_source >= 0 and not lines[idx_without_source].strip():
+                idx_without_source -= 1
+            continue
+        break
+
+    text_without_source = "\n".join(lines[: idx_without_source + 1]).strip()
+
+    parsed_lines: list[list[str]] = []
+    idx = idx_without_source
+
+    while idx >= 0:
+        current = lines[idx].strip()
+        if not current:
+            idx -= 1
+            continue
+
+        parsed = _parse_hashtag_line(current)
+        if parsed is None:
+            break
+        parsed_lines.append(parsed)
+        idx -= 1
+
+    has_hashtag_block = bool(parsed_lines)
+    if not has_hashtag_block:
+        return text_without_source, [], False
+
+    lines_top_to_bottom = list(reversed(parsed_lines))
+    baseline_set = set(baseline_hashtags or [])
+    if baseline_set:
+        filtered_lines = [line for line in lines_top_to_bottom if set(line) != baseline_set]
+        if filtered_lines:
+            lines_top_to_bottom = filtered_lines
+
+    manual: list[str] = []
+    seen: set[str] = set()
+    for parsed_line in lines_top_to_bottom:
+        for tag in parsed_line:
+            if tag not in seen:
+                seen.add(tag)
+                manual.append(tag)
+
+    body = "\n".join(lines[: idx + 1]).strip()
+    return body, manual, True
+
+
+def _parse_hashtag_line(line: str) -> list[str] | None:
+    tokens = [token for token in re.split(r"[\s,;|/]+", line.strip()) if token]
+    if not tokens:
+        return None
+    if not all(token.startswith("#") for token in tokens):
+        return None
+
+    parsed: list[str] = []
+    for token in tokens:
+        normalized = token.lstrip("#").strip().strip(".,:!?()[]{}").lower()
+        if _HASHTAG_TOKEN_RE.fullmatch(normalized):
+            parsed.append(normalized)
+    return parsed
+
+
+def _apply_manual_hashtags(
+    draft: Draft,
+    *,
+    hashtags: list[str],
+    has_hashtag_block: bool,
+) -> bool:
+    if not has_hashtag_block:
+        return False
+
+    reasons = dict(draft.score_reasons) if isinstance(draft.score_reasons, dict) else {}
+    old_manual = reasons.get("manual_hashtags")
+    old_manual_list = [str(item) for item in old_manual] if isinstance(old_manual, list) else None
+
+    new_manual_list = [f"#{tag}" for tag in hashtags] if hashtags else None
+    if new_manual_list:
+        reasons["manual_hashtags"] = new_manual_list
+    else:
+        reasons.pop("manual_hashtags", None)
+
+    draft.score_reasons = reasons if reasons else None
+    return old_manual_list != new_manual_list
+
+
+def _extract_existing_hashtags(draft: Draft) -> list[str]:
+    reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+    baseline_raw = reasons.get("manual_hashtags")
+    if not isinstance(baseline_raw, list):
+        baseline_raw = reasons.get("auto_hashtags")
+    if not isinstance(baseline_raw, list):
+        return []
+
+    parsed: list[str] = []
+    seen: set[str] = set()
+    for item in baseline_raw:
+        normalized = str(item).lstrip("#").strip().lower()
+        if not _HASHTAG_TOKEN_RE.fullmatch(normalized):
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            parsed.append(normalized)
+    return parsed
+
+
+def _is_source_tail_line(line: str, *, normalized_url: str | None) -> bool:
+    known_url = (normalized_url or "").strip()
+    source_match = _SOURCE_LABEL_RE.match(line)
+
+    if source_match:
+        matched_url = (source_match.group("url") or "").rstrip(").,")
+        if not matched_url:
+            return True
+        if not known_url:
+            return True
+        return matched_url.startswith(known_url)
+
+    if _URL_ONLY_RE.match(line):
+        if not known_url:
+            return True
+        return line.rstrip(").,").startswith(known_url)
+
+    return False

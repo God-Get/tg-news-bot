@@ -51,6 +51,42 @@ class SettingsContext:
     analytics: AnalyticsService | None = None
 
 
+def parse_source_args(raw_args: str) -> tuple[str, str]:
+    raw = raw_args.strip()
+    if "|" in raw:
+        url, name = raw.split("|", maxsplit=1)
+        return url.strip(), name.strip()
+    parts = raw.split(maxsplit=1)
+    if len(parts) == 1:
+        return parts[0].strip(), ""
+    return parts[0].strip(), parts[1].strip()
+
+
+def parse_source_batch_args(raw_args: str) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    for raw_line in raw_args.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.lower().startswith("/add_source"):
+            line = line[len("/add_source") :].strip()
+        if not line:
+            continue
+        entries.append(parse_source_args(line))
+
+    if entries:
+        return entries
+
+    single = raw_args.strip()
+    if not single:
+        return []
+    if single.lower().startswith("/add_source"):
+        single = single[len("/add_source") :].strip()
+    if not single:
+        return []
+    return [parse_source_args(single)]
+
+
 def create_settings_router(context: SettingsContext) -> Router:
     router = Router()
     command_meta = {
@@ -130,7 +166,7 @@ def create_settings_router(context: SettingsContext) -> Router:
         },
         "add_source": {
             "syntax": "/add_source <rss_url> [name]",
-            "description": "Добавляет новый RSS-источник или обновляет существующий.",
+            "description": "Добавляет/обновляет RSS-источник. Поддерживает пакет: несколько строк '<url> | <name>' в одном сообщении.",
             "where": "Обычно #General.",
             "example": "/add_source https://example.com/rss Tech News",
         },
@@ -402,16 +438,6 @@ def create_settings_router(context: SettingsContext) -> Router:
 
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and message.from_user.id == context.settings.admin_user_id)
-
-    def parse_source_args(raw_args: str) -> tuple[str, str]:
-        raw = raw_args.strip()
-        if "|" in raw:
-            url, name = raw.split("|", maxsplit=1)
-            return url.strip(), name.strip()
-        parts = raw.split(maxsplit=1)
-        if len(parts) == 1:
-            return parts[0].strip(), ""
-        return parts[0].strip(), parts[1].strip()
 
     def valid_source_url(url: str) -> bool:
         parsed = urlparse(url)
@@ -1129,52 +1155,129 @@ def create_settings_router(context: SettingsContext) -> Router:
                 ),
             )
             return
-        source_url, source_name = parse_source_args(command.args)
-        if not valid_source_url(source_url):
+        entries = parse_source_batch_args(command.args)
+        if not entries:
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Некорректный URL. Нужен http/https RSS URL.",
+                text=(
+                    "Формат: /add_source <rss_url> [имя]\n"
+                    "или: /add_source <rss_url> | <имя>"
+                ),
             )
             return
-        ok, validation_message = await validate_rss_url(source_url)
-        if not ok:
+
+        if len(entries) == 1:
+            source_url, source_name = entries[0]
+            if not valid_source_url(source_url):
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Некорректный URL. Нужен http/https RSS URL.",
+                )
+                return
+            ok, validation_message = await validate_rss_url(source_url)
+            if not ok:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text=f"Источник не прошёл проверку: {validation_message}",
+                )
+                return
+            if not source_name:
+                source_name = urlparse(source_url).netloc
+            async with context.session_factory() as session:
+                async with session.begin():
+                    existing = await context.source_repository.get_by_url(session, source_url)
+                    if existing:
+                        existing.name = source_name or existing.name
+                        existing.enabled = True
+                        await session.flush()
+                        source = existing
+                        action = "обновлён"
+                    else:
+                        source = await context.source_repository.create(
+                            session,
+                            name=source_name,
+                            url=source_url,
+                            enabled=True,
+                        )
+                        action = "добавлен"
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text=f"Источник не прошёл проверку: {validation_message}",
+                text=(
+                    f"Источник {action}: #{source.id}\n"
+                    f"name: {source.name}\n"
+                    f"url: {source.url}\n"
+                    f"enabled: {source.enabled}\n"
+                    f"trust_score: {float(source.trust_score or 0.0):.2f}\n"
+                    f"validation: {validation_message}"
+                ),
             )
             return
-        if not source_name:
-            source_name = urlparse(source_url).netloc
-        async with context.session_factory() as session:
-            async with session.begin():
-                existing = await context.source_repository.get_by_url(session, source_url)
-                if existing:
-                    existing.name = source_name or existing.name
-                    existing.enabled = True
-                    await session.flush()
-                    source = existing
-                    action = "обновлён"
-                else:
-                    source = await context.source_repository.create(
-                        session,
-                        name=source_name,
-                        url=source_url,
-                        enabled=True,
-                    )
-                    action = "добавлен"
+
+        success_lines: list[str] = []
+        error_lines: list[str] = []
+        added = 0
+        updated = 0
+
+        for idx, (source_url, source_name) in enumerate(entries, start=1):
+            if not valid_source_url(source_url):
+                error_lines.append(f"{idx}. {source_url or '<empty>'} -> некорректный URL")
+                continue
+
+            ok, validation_message = await validate_rss_url(source_url)
+            if not ok:
+                error_lines.append(f"{idx}. {source_url} -> {validation_message}")
+                continue
+
+            resolved_name = source_name or urlparse(source_url).netloc
+            async with context.session_factory() as session:
+                async with session.begin():
+                    existing = await context.source_repository.get_by_url(session, source_url)
+                    if existing:
+                        existing.name = resolved_name or existing.name
+                        existing.enabled = True
+                        await session.flush()
+                        source = existing
+                        action = "обновлён"
+                        updated += 1
+                    else:
+                        source = await context.source_repository.create(
+                            session,
+                            name=resolved_name,
+                            url=source_url,
+                            enabled=True,
+                        )
+                        action = "добавлен"
+                        added += 1
+            success_lines.append(
+                f"{idx}. #{source.id} {action}: {source.name} ({validation_message})"
+            )
+
+        lines = [
+            f"Обработано строк: {len(entries)}",
+            f"Успешно: {len(success_lines)} (добавлено: {added}, обновлено: {updated})",
+            f"Ошибки: {len(error_lines)}",
+        ]
+        if success_lines:
+            lines.append("")
+            lines.append("Успешные:")
+            lines.extend(success_lines[:20])
+            if len(success_lines) > 20:
+                lines.append(f"... ещё {len(success_lines) - 20}")
+        if error_lines:
+            lines.append("")
+            lines.append("С ошибками:")
+            lines.extend(error_lines[:20])
+            if len(error_lines) > 20:
+                lines.append(f"... ещё {len(error_lines) - 20}")
+
         await context.publisher.send_text(
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
-            text=(
-                f"Источник {action}: #{source.id}\n"
-                f"name: {source.name}\n"
-                f"url: {source.url}\n"
-                f"enabled: {source.enabled}\n"
-                f"trust_score: {float(source.trust_score or 0.0):.2f}\n"
-                f"validation: {validation_message}"
-            ),
+            text="\n".join(lines),
         )
 
     @router.message(Command("list_sources"))

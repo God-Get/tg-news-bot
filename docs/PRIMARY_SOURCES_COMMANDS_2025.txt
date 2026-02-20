@@ -1,0 +1,23 @@
+
+/add_source https://www.nature.com/nature.rss | Nature
+/add_source https://www.nature.com/subjects/astronomy-and-astrophysics.rss | Nature Astronomy
+/add_source https://news.mit.edu/rss/feed | MIT News
+/add_source https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml | MIT News AI
+/add_source https://rss.arxiv.org/rss/cs.AI | arXiv cs.AI
+/add_source https://rss.arxiv.org/rss/astro-ph | arXiv astro-ph
+/add_source https://rss.arxiv.org/rss/physics.app-ph | arXiv physics.app-ph
+/add_source https://www.nasa.gov/news-release/feed/ | NASA News
+/add_source https://openai.com/news/rss.xml | OpenAI News
+/add_source https://www.science.org/action/showFeed?jc=science&type=etoc&feed=rss | Science Journal TOC
+/add_source https://news.northwestern.edu/feeds/allStories | Northwestern Now
+/add_source https://www.cam.ac.uk/news/feed | Cambridge News
+/add_source https://news.illinois.edu/feed/ | Illinois News Bureau
+/add_source https://news.uci.edu/feed/ | UC Irvine News
+/add_source https://www.colorado.edu/today/rss.xml | CU Boulder Today
+/add_source https://www.caltech.edu/about/news/rss | Caltech News
+/add_source https://medicine.washu.edu/feed/ | WashU Medicine
+/add_source https://news.weill.cornell.edu/rss.xml | Weill Cornell Newsroom
+/add_source https://newsroom.ucla.edu/rss.xml | UCLA Newsroom
+/add_source https://www.cs.cmu.edu/news/feed | CMU SCS News
+/add_source https://today.uconn.edu/feed/ | UConn Today
+/add_source https://news.vumc.org/feed/ | Vanderbilt Health News

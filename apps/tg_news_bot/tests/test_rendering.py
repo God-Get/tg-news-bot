@@ -157,6 +157,27 @@ def test_render_post_content_uses_manual_hashtags_override() -> None:
     assert "#ai" not in content.text
 
 
+def test_render_post_content_preserves_manual_hashtags_order_and_count() -> None:
+    draft = _make_draft(
+        state=DraftState.INBOX,
+        post_text_ru="Заголовок\n\nТекст поста",
+        score_reasons={
+            "manual_hashtags": ["#science", "#наука", "#space", "#космос", "#ai", "#сталь"],
+            "kw:AI": 1.0,
+        },
+    )
+    formatting = PostFormattingSettings(
+        source_mode="text",
+        hashtag_mode="both",
+        hashtags_limit=3,
+    )
+
+    content = render_post_content(draft, formatting=formatting)
+
+    assert "#science #наука #space #космос #ai #сталь" in content.text
+    assert "#ии" not in content.text
+
+
 def test_render_post_content_uses_defaults_when_data_missing() -> None:
     draft = _make_draft(
         state=DraftState.INBOX,

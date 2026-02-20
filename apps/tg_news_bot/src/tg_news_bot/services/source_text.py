@@ -6,6 +6,20 @@ import re
 _BULLET_PREFIX_RE = re.compile(r"^\s*[-*•\u2013\u2014]+\s*")
 _META_LABEL_RE = re.compile(r"(?i)^(date|source|summary|share)\s*:\s*(.*)$")
 _SEPARATOR_RE = re.compile(r"^\s*[-*•\u2013\u2014]+\s*$")
+_NATURE_BROWSER_NOTICE_RE = re.compile(
+    r"(?is)\bthank\s+you\s+for\s+visiting\s+nature\.com\.\s*"
+    r"you\s+are\s+using\s+a\s+browser\s+version\s+with\s+limited\s+support\s+for\s+css\.\s*"
+    r"to\s+obtain\s+the\s+best\s+experience,\s*we\s+recommend\s+you\s+use\s+a\s+more\s+up\s+to\s+date\s+browser\s*"
+    r"\(or\s+turn\s+off\s+compatibility\s+mode\s+in\s+internet\s+explorer\)\.\s*"
+    r"in\s+the\s+meantime,\s*to\s+ensure\s+continued\s+support,\s*we\s+are\s+displaying\s+the\s+site\s+without\s+styles\s+and\s+javascript\.\s*"
+)
+_NATURE_ACCESS_OPTIONS_RE = re.compile(
+    r"(?is)\baccess\s+options\b.*?"
+    r"get\s+nature\+.*?"
+    r"\brent\s+or\s+buy\s+this\s+article\b.*?"
+    r"\bprices\s+may\s+be\s+subject\s+to\s+local\s+taxes\s+which\s+are\s+calculated\s+during\s+checkout\b\.?\s*"
+    r"(?:doi\s*:\s*)?"
+)
 
 
 def _parse_meta_label(line: str) -> tuple[str, str] | None:
@@ -31,6 +45,8 @@ def sanitize_source_text(text: str | None) -> str:
         cleaned,
         count=1,
     ).strip()
+    cleaned = _NATURE_BROWSER_NOTICE_RE.sub("", cleaned).strip()
+    cleaned = _NATURE_ACCESS_OPTIONS_RE.sub("", cleaned).strip()
 
     lines = cleaned.splitlines()
     result: list[str] = []

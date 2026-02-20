@@ -272,11 +272,14 @@ def _extract_hashtags(
     manual_hashtags = reasons.get("manual_hashtags")
     if isinstance(manual_hashtags, list):
         for item in manual_hashtags:
-            add_variants(str(item).lstrip("#"))
-            if len(tags) >= limit:
-                return tags[:limit]
-        # If editor explicitly set manual hashtags, do not mix with auto keywords.
-        return tags[:limit]
+            normalized = _normalize_tag(str(item).lstrip("#"))
+            canonical = _canonical_tag(normalized)
+            if normalized and canonical not in seen and _is_quality_tag(normalized):
+                seen.add(canonical)
+                tags.append(f"#{normalized}")
+        # If editor explicitly set manual hashtags, do not mix with auto keywords
+        # and preserve the explicit order from the editor.
+        return tags
 
     auto_hashtags = reasons.get("auto_hashtags")
     if isinstance(auto_hashtags, list):
