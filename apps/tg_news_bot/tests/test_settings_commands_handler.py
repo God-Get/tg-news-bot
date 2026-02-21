@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tg_news_bot.ports.publisher import PublisherNotModified
 from tg_news_bot.telegram.handlers.settings import SettingsContext, create_settings_router
 
 
@@ -13,6 +14,9 @@ from tg_news_bot.telegram.handlers.settings import SettingsContext, create_setti
 class _PublisherSpy:
     sent: list[dict] = field(default_factory=list)
     edits: list[dict] = field(default_factory=list)
+    deleted: list[dict] = field(default_factory=list)
+    next_message_id: int = 1000
+    raise_not_modified_on_edit: bool = False
 
     async def send_text(
         self,
@@ -22,15 +26,18 @@ class _PublisherSpy:
         text: str,
         parse_mode=None,  # noqa: ANN001
         keyboard=None,  # noqa: ANN001
-    ) -> None:
+    ):
+        self.next_message_id += 1
         self.sent.append(
             {
                 "chat_id": chat_id,
                 "topic_id": topic_id,
                 "text": text,
                 "keyboard": keyboard,
+                "message_id": self.next_message_id,
             }
         )
+        return SimpleNamespace(chat_id=chat_id, message_id=self.next_message_id)
 
     async def edit_text(
         self,
@@ -42,6 +49,8 @@ class _PublisherSpy:
         parse_mode=None,  # noqa: ANN001
         disable_web_page_preview: bool = False,
     ) -> None:
+        if self.raise_not_modified_on_edit:
+            raise PublisherNotModified("message is not modified")
         self.edits.append(
             {
                 "chat_id": chat_id,
@@ -52,6 +61,9 @@ class _PublisherSpy:
                 "disable_web_page_preview": disable_web_page_preview,
             }
         )
+
+    async def delete_message(self, *, chat_id: int, message_id: int) -> None:
+        self.deleted.append({"chat_id": chat_id, "message_id": message_id})
 
 
 @dataclass
@@ -505,6 +517,26 @@ async def test_menu_sends_operational_center_with_keyboard() -> None:
 
 
 @pytest.mark.asyncio
+async def test_menu_reopens_without_old_tail_message() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    _, handler = _router_and_handler_by_name(
+        "menu",
+        publisher=publisher,
+        ingestion=ingestion,
+    )
+
+    message = _Message(chat_id=-1001, topic_id=7)
+    await handler(message)
+    first_menu_message_id = publisher.sent[-1]["message_id"]
+
+    await handler(message)
+
+    assert len(publisher.sent) == 2
+    assert publisher.deleted == [{"chat_id": -1001, "message_id": first_menu_message_id}]
+
+
+@pytest.mark.asyncio
 async def test_setup_ui_sends_wizard_with_keyboard() -> None:
     publisher = _PublisherSpy()
     ingestion = _IngestionRunnerSpy()
@@ -546,6 +578,22 @@ async def test_ops_menu_callback_opens_system_page() -> None:
 
     assert publisher.edits
     assert "Раздел: Система" in publisher.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_callback_not_modified_does_not_create_tail() -> None:
+    publisher = _PublisherSpy(raise_not_modified_on_edit=True)
+    ingestion = _IngestionRunnerSpy()
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+    )
+
+    query = _CallbackQuery(data="ops:page:system")
+    await handler(query)
+
+    assert publisher.sent == []
+    assert publisher.deleted == []
 
 
 @pytest.mark.asyncio

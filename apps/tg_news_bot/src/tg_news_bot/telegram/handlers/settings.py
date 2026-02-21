@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import re
@@ -538,9 +539,59 @@ def create_settings_router(context: SettingsContext) -> Router:
         "FAILED": "ошибка",
     }
     ops_callback_prefix = "ops:"
+    ops_menu_messages: dict[tuple[int, int | None], int] = {}
+    background_jobs: set[asyncio.Task] = set()
+    ops_menu_text = (
+        "Операционный центр.\n"
+        "Разделы: Система, Источники, Тренды, Планировщик.\n"
+        "Кнопки выполняют типовые сценарии, команды оставлены для тонкой настройки."
+    )
 
     def ops_data(action: str) -> str:
         return f"{ops_callback_prefix}{action}"
+
+    def menu_scope_key(chat_id: int, topic_id: int | None) -> tuple[int, int | None]:
+        return chat_id, topic_id
+
+    async def safe_delete_message(*, chat_id: int, message_id: int) -> None:
+        try:
+            await context.publisher.delete_message(chat_id=chat_id, message_id=message_id)
+        except (PublisherNotFound, PublisherEditNotAllowed, PublisherNotModified):
+            return
+        except Exception:
+            log.exception(
+                "settings.ops_menu_delete_failed",
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+
+    def launch_background_job(*, job_name: str, coro) -> None:
+        task = asyncio.create_task(coro)
+        background_jobs.add(task)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            background_jobs.discard(done_task)
+            try:
+                done_task.result()
+            except Exception:
+                log.exception("settings.background_job_failed", job=job_name)
+
+        task.add_done_callback(_on_done)
+
+    async def open_ops_menu(*, chat_id: int, topic_id: int | None) -> None:
+        key = menu_scope_key(chat_id, topic_id)
+        previous_message_id = ops_menu_messages.get(key)
+        send_result = await context.publisher.send_text(
+            chat_id=chat_id,
+            topic_id=topic_id,
+            text=ops_menu_text,
+            keyboard=build_ops_menu_keyboard(),
+        )
+        new_message_id = getattr(send_result, "message_id", None)
+        if isinstance(new_message_id, int):
+            ops_menu_messages[key] = new_message_id
+            if previous_message_id is not None and previous_message_id != new_message_id:
+                await safe_delete_message(chat_id=chat_id, message_id=previous_message_id)
 
     def build_ops_menu_keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
@@ -1054,28 +1105,59 @@ def create_settings_router(context: SettingsContext) -> Router:
         text: str,
         keyboard: InlineKeyboardMarkup,
     ) -> None:
-        if query.message is not None:
+        if query.message is None:
+            return
+
+        chat_id = query.message.chat.id
+        topic_id = query.message.message_thread_id
+        current_message_id = query.message.message_id
+        key = menu_scope_key(chat_id, topic_id)
+        tracked_message_id = ops_menu_messages.get(key)
+
+        candidate_ids: list[int] = []
+        if isinstance(tracked_message_id, int):
+            candidate_ids.append(tracked_message_id)
+        if current_message_id not in candidate_ids:
+            candidate_ids.append(current_message_id)
+
+        for candidate_message_id in candidate_ids:
             try:
                 await context.publisher.edit_text(
-                    chat_id=query.message.chat.id,
-                    message_id=query.message.message_id,
+                    chat_id=chat_id,
+                    message_id=candidate_message_id,
                     text=text,
                     keyboard=keyboard,
                     disable_web_page_preview=True,
                 )
+                ops_menu_messages[key] = candidate_message_id
+                if (
+                    current_message_id != candidate_message_id
+                    and current_message_id != tracked_message_id
+                ):
+                    await safe_delete_message(chat_id=chat_id, message_id=current_message_id)
                 return
-            except (PublisherNotFound, PublisherEditNotAllowed, PublisherNotModified):
-                pass
+            except PublisherNotModified:
+                ops_menu_messages[key] = candidate_message_id
+                return
+            except (PublisherNotFound, PublisherEditNotAllowed):
+                continue
             except Exception:
                 log.exception("settings.ops_menu_edit_failed")
 
-        if query.message is not None:
-            await context.publisher.send_text(
-                chat_id=query.message.chat.id,
-                topic_id=query.message.message_thread_id,
-                text=text,
-                keyboard=keyboard,
-            )
+        send_result = await context.publisher.send_text(
+            chat_id=chat_id,
+            topic_id=topic_id,
+            text=text,
+            keyboard=keyboard,
+        )
+        new_message_id = getattr(send_result, "message_id", None)
+        if isinstance(new_message_id, int):
+            previous_id = ops_menu_messages.get(key)
+            ops_menu_messages[key] = new_message_id
+            if previous_id is not None and previous_id != new_message_id:
+                await safe_delete_message(chat_id=chat_id, message_id=previous_id)
+            if current_message_id != new_message_id:
+                await safe_delete_message(chat_id=chat_id, message_id=current_message_id)
 
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and message.from_user.id == context.settings.admin_user_id)
@@ -1939,15 +2021,9 @@ def create_settings_router(context: SettingsContext) -> Router:
     async def menu(message: Message) -> None:
         if not is_admin(message):
             return
-        await context.publisher.send_text(
+        await open_ops_menu(
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
-            text=(
-                "Операционный центр.\n"
-                "Разделы: Система, Источники, Тренды, Планировщик.\n"
-                "Кнопки выполняют типовые сценарии, команды оставлены для тонкой настройки."
-            ),
-            keyboard=build_ops_menu_keyboard(),
         )
 
     @router.message(Command("setup_ui"))
@@ -3827,11 +3903,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             if action == "menu":
                 await send_or_edit_ops_page(
                     query=query,
-                    text=(
-                        "Операционный центр.\n"
-                        "Разделы: Система, Источники, Тренды, Планировщик.\n"
-                        "Кнопки выполняют типовые сценарии, команды оставлены для тонкой настройки."
-                    ),
+                    text=ops_menu_text,
                     keyboard=build_ops_menu_keyboard(),
                 )
                 return
@@ -3899,7 +3971,15 @@ def create_settings_router(context: SettingsContext) -> Router:
                     await commands_help(proxy_message)
                     return
                 if act == "ingest_now":
-                    await ingest_now(proxy_message)
+                    launch_background_job(
+                        job_name="ops_ingest_now",
+                        coro=ingest_now(proxy_message),
+                    )
+                    await send_or_edit_ops_page(
+                        query=query,
+                        text="Раздел: Система\nIngest запущен в фоне.",
+                        keyboard=build_ops_system_keyboard(),
+                    )
                     return
                 if act == "analytics24":
                     await analytics(proxy_message, SimpleNamespace(args="24"))
@@ -3998,7 +4078,10 @@ def create_settings_router(context: SettingsContext) -> Router:
                     await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
                     return
                 if src_action == "ing":
-                    await ingest_source(proxy_message, SimpleNamespace(args=str(source_id)))
+                    launch_background_job(
+                        job_name=f"ops_ingest_source_{source_id}",
+                        coro=ingest_source(proxy_message, SimpleNamespace(args=str(source_id))),
+                    )
                     text, keyboard = await render_ops_sources_page(page=page)
                     await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
                     return
@@ -4040,10 +4123,26 @@ def create_settings_router(context: SettingsContext) -> Router:
             if tokens[0] == "tr":
                 tr_action = tokens[1] if len(tokens) >= 2 else ""
                 if tr_action == "collect":
-                    await collect_trends(proxy_message)
+                    launch_background_job(
+                        job_name="ops_collect_trends",
+                        coro=collect_trends(proxy_message),
+                    )
+                    await send_or_edit_ops_page(
+                        query=query,
+                        text="Раздел: Тренды\nCollect trends запущен в фоне.",
+                        keyboard=build_ops_trends_keyboard(),
+                    )
                     return
                 if tr_action == "scan":
-                    await trend_scan(proxy_message, SimpleNamespace(args="24 6"))
+                    launch_background_job(
+                        job_name="ops_trend_scan",
+                        coro=trend_scan(proxy_message, SimpleNamespace(args="24 6")),
+                    )
+                    await send_or_edit_ops_page(
+                        query=query,
+                        text="Раздел: Тренды\nTrend scan запущен в фоне.",
+                        keyboard=build_ops_trends_keyboard(),
+                    )
                     return
                 if tr_action == "signals":
                     await trends(proxy_message, SimpleNamespace(args="24 20"))
