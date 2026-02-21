@@ -107,3 +107,5 @@ def test_scoring_applies_trend_and_trust_boosts() -> None:
     assert result.reasons["trend:nvidia"] == pytest.approx(0.4)
     assert result.reasons["trend:openai"] == pytest.approx(0.5)
     assert result.reasons["source_trust"] == pytest.approx(0.3)
+    assert result.reasons["hot_score"] == pytest.approx(0.9)
+    assert result.reasons["trust_score"] == pytest.approx(2.0)

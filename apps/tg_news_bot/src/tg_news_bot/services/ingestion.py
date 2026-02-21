@@ -331,9 +331,16 @@ class IngestionRunner:
         )
         if response is None:
             stats.rss_fetch_errors += 1
+            await self._record_source_quality_event(source_id=source_id, event="rss_http_error")
             return
         if response.status_code >= 400:
             stats.rss_fetch_errors += 1
+            event_name = "rss_http_403" if response.status_code == 403 else "rss_http_error"
+            await self._record_source_quality_event(
+                source_id=source_id,
+                event=event_name,
+                details={"status": response.status_code},
+            )
             self._log.warning(
                 "ingestion.fetch_rss_failed",
                 source_id=source_id,
@@ -349,6 +356,15 @@ class IngestionRunner:
 
         feed = feedparser.parse(response.text)
         entries = feed.entries[: self._config.max_items_per_source]
+        if not entries:
+            await self._record_source_quality_event(
+                source_id=source_id,
+                event="rss_empty",
+            )
+            return
+
+        duplicates_before = stats.duplicates
+        created_local = 0
         for entry in entries:
             stats.entries_total += 1
             if await self._process_entry(
@@ -361,6 +377,22 @@ class IngestionRunner:
                 stats,
             ):
                 stats.created += 1
+                created_local += 1
+
+        duplicates_local = max(stats.duplicates - duplicates_before, 0)
+        total_local = len(entries)
+        if total_local >= 8:
+            duplicate_rate = duplicates_local / float(total_local)
+            if duplicate_rate >= 0.85 and created_local == 0:
+                await self._record_source_quality_event(
+                    source_id=source_id,
+                    event="high_duplicate_rate",
+                    details={
+                        "duplicate_rate": round(duplicate_rate, 3),
+                        "entries": total_local,
+                        "duplicates": duplicates_local,
+                    },
+                )
 
     async def _process_entry(
         self,
@@ -884,20 +916,65 @@ class IngestionRunner:
         source_quality = getattr(self, "_source_quality", None)
         if source_quality is None:
             return
+        quality_result = None
         try:
             async with self._session_factory() as session:
                 async with session.begin():
-                    await source_quality.apply_event(
+                    quality_result = await source_quality.apply_event(
                         session,
                         source_id=source_id,
                         event=event,
                         details=details,
                     )
+            if quality_result and quality_result.auto_disabled:
+                await self._notify_source_auto_disabled(
+                    source_id=quality_result.source_id,
+                    source_name=quality_result.source_name,
+                    trust_score=quality_result.trust_score,
+                    events_total=quality_result.events_total,
+                    consecutive_failures=quality_result.consecutive_failures,
+                    trigger_event=event,
+                )
         except Exception:
             self._log.exception(
                 "ingestion.source_quality_update_failed",
                 source_id=source_id,
                 event=event,
+            )
+
+    async def _notify_source_auto_disabled(
+        self,
+        *,
+        source_id: int,
+        source_name: str,
+        trust_score: float,
+        events_total: int,
+        consecutive_failures: int,
+        trigger_event: str,
+    ) -> None:
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    bot_settings = await self._settings_repo.get_or_create(session)
+                    chat_id = bot_settings.group_chat_id
+                    topic_id = bot_settings.editing_topic_id or bot_settings.inbox_topic_id
+            if not chat_id or not topic_id:
+                return
+            await self._publisher.send_text(
+                chat_id=chat_id,
+                topic_id=topic_id,
+                text=(
+                    "Source health alert:\n"
+                    f"Источник #{source_id} ({source_name}) автоматически отключен.\n"
+                    f"trust_score={trust_score:.2f}, events={events_total}, "
+                    f"consecutive_failures={consecutive_failures}, trigger={trigger_event}.\n"
+                    f"Проверка/включение: /source_quality {source_id} и /enable_source {source_id}"
+                ),
+            )
+        except Exception:
+            self._log.exception(
+                "ingestion.source_quality_notify_failed",
+                source_id=source_id,
             )
 
     @staticmethod

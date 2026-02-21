@@ -99,3 +99,72 @@ def test_rules_payload_roundtrip_and_bounds() -> None:
     assert rules.slot_step_minutes == 5
     assert rules.horizon_hours == 168
     assert payload["timezone_name"] == "Europe/Moscow"
+
+
+def test_build_autoplan_prefers_peak_hour_slots_when_configured() -> None:
+    now = datetime(2026, 2, 20, 8, 5, tzinfo=timezone.utc)
+    rules = AutoPlanRules(
+        timezone_name="UTC",
+        min_gap_minutes=60,
+        max_posts_per_day=6,
+        quiet_start_hour=23,
+        quiet_end_hour=8,
+        slot_step_minutes=30,
+        horizon_hours=24,
+    )
+    drafts = [
+        AutoPlanDraft(draft_id=20, score=5.0, created_at=now, source_trust=0.0),
+    ]
+
+    result = build_autoplan(
+        drafts=drafts,
+        existing_schedule_utc=[],
+        rules=rules,
+        now_utc=now,
+        limit=5,
+        peak_hours=[9],
+        peak_bonus=0.8,
+    )
+
+    assert len(result.scheduled) == 1
+    assert result.scheduled[0].schedule_at == datetime(2026, 2, 20, 9, 0, tzinfo=timezone.utc)
+
+
+def test_build_autoplan_applies_topic_weight_in_priority() -> None:
+    now = datetime(2026, 2, 20, 8, 5, tzinfo=timezone.utc)
+    rules = AutoPlanRules(
+        timezone_name="UTC",
+        min_gap_minutes=60,
+        max_posts_per_day=6,
+        quiet_start_hour=23,
+        quiet_end_hour=8,
+        slot_step_minutes=30,
+        horizon_hours=24,
+    )
+    drafts = [
+        AutoPlanDraft(
+            draft_id=30,
+            score=5.0,
+            created_at=now,
+            source_trust=0.0,
+            topic_hint="science",
+        ),
+        AutoPlanDraft(
+            draft_id=31,
+            score=4.7,
+            created_at=now,
+            source_trust=0.0,
+            topic_hint="ai",
+        ),
+    ]
+
+    result = build_autoplan(
+        drafts=drafts,
+        existing_schedule_utc=[],
+        rules=rules,
+        now_utc=now,
+        limit=2,
+        topic_weights={"ai": 0.8},
+    )
+
+    assert [item.draft_id for item in result.scheduled] == [31, 30]

@@ -241,7 +241,7 @@ async def test_safe_delete_ignores_delete_not_allowed() -> None:
 @pytest.mark.asyncio
 async def test_to_ready_fails_on_content_safety() -> None:
     draft = _make_draft(state=DraftState.EDITING)
-    draft.post_text_ru = "Короткий промо текст buy now"
+    draft.post_text_ru = ("Detailed review of a new superconducting qubit control method with experiment details, " + "data validation notes, system limitations, reproducibility checks and deployment steps. " + "Editorial flag: buy now. Additional context with benchmark tables, statistical confidence intervals, failure modes, and reproducibility protocol details for independent teams.")
     workflow = SpyWorkflow(draft=draft)
 
     with pytest.raises(ValueError, match="content_safety_failed"):
@@ -252,3 +252,24 @@ async def test_to_ready_fails_on_content_safety() -> None:
                 user_id=1,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_to_ready_auto_archives_empty_post_when_quality_gate_rejects() -> None:
+    draft = _make_draft(state=DraftState.EDITING)
+    draft.post_text_ru = "Access options. Subscribe to this journal."
+    draft.extracted_text = ""
+    workflow = SpyWorkflow(draft=draft)
+
+    await workflow.transition(
+        TransitionRequest(
+            draft_id=1,
+            action=DraftAction.TO_READY,
+            user_id=1,
+        )
+    )
+
+    assert draft.state == DraftState.ARCHIVE
+    assert workflow.move_calls == 1
+    assert isinstance(draft.score_reasons, dict)
+    assert "quality_gate" in draft.score_reasons

@@ -172,6 +172,30 @@ class TrendCandidateRepository:
         )
         return list(result.scalars().all())
 
+    async def count_pending_article_candidates(self, session: AsyncSession) -> int:
+        result = await session.execute(
+            select(TrendArticleCandidate.id).where(
+                TrendArticleCandidate.status == TrendCandidateStatus.PENDING
+            )
+        )
+        return len(result.scalars().all())
+
+    async def list_pending_article_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        limit: int,
+        offset: int,
+    ) -> list[TrendArticleCandidate]:
+        result = await session.execute(
+            select(TrendArticleCandidate)
+            .where(TrendArticleCandidate.status == TrendCandidateStatus.PENDING)
+            .order_by(TrendArticleCandidate.score.desc(), TrendArticleCandidate.id.asc())
+            .limit(limit)
+            .offset(max(offset, 0))
+        )
+        return list(result.scalars().all())
+
     async def create_or_update_source_candidate(
         self,
         session: AsyncSession,
@@ -240,5 +264,29 @@ class TrendCandidateRepository:
             .where(TrendSourceCandidate.topic_id == topic_id)
             .order_by(TrendSourceCandidate.score.desc(), TrendSourceCandidate.id.asc())
             .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def count_pending_source_candidates(self, session: AsyncSession) -> int:
+        result = await session.execute(
+            select(TrendSourceCandidate.id).where(
+                TrendSourceCandidate.status == TrendCandidateStatus.PENDING
+            )
+        )
+        return len(result.scalars().all())
+
+    async def list_pending_source_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        limit: int,
+        offset: int,
+    ) -> list[TrendSourceCandidate]:
+        result = await session.execute(
+            select(TrendSourceCandidate)
+            .where(TrendSourceCandidate.status == TrendCandidateStatus.PENDING)
+            .order_by(TrendSourceCandidate.score.desc(), TrendSourceCandidate.id.asc())
+            .limit(limit)
+            .offset(max(offset, 0))
         )
         return list(result.scalars().all())

@@ -21,6 +21,7 @@ from tg_news_bot.services.analytics import AnalyticsService
 from tg_news_bot.services.edit_sessions import EditSessionService
 from tg_news_bot.services.health import HealthServer
 from tg_news_bot.services.ingestion import IngestionConfig, IngestionRunner
+from tg_news_bot.services.quality_gate import QualityGateService
 from tg_news_bot.services.schedule_input import ScheduleInputService
 from tg_news_bot.services.scheduler import SchedulerConfig, SchedulerRunner
 from tg_news_bot.services.text_generation import build_text_pipeline
@@ -80,6 +81,7 @@ async def _run() -> int:
         publisher,
         post_formatting=settings.post_formatting,
         text_pipeline=workflow_text_pipeline,
+        quality_gate=QualityGateService(settings.quality_gate),
     )
     trend_discovery = TrendDiscoveryService(
         settings=settings,

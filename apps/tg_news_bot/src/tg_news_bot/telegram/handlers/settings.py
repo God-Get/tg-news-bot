@@ -29,6 +29,7 @@ from tg_news_bot.ports.publisher import (
 from tg_news_bot.repositories.drafts import DraftRepository
 from tg_news_bot.repositories.scheduled_posts import ScheduledPostRepository
 from tg_news_bot.repositories.sources import SourceRepository
+from tg_news_bot.repositories.trend_candidates import TrendCandidateRepository
 from tg_news_bot.repositories.trend_topic_profiles import (
     TrendTopicProfileInput,
     TrendTopicProfileRepository,
@@ -65,6 +66,7 @@ class SettingsContext:
     analytics: AnalyticsService | None = None
     autoplan: AutoPlanService | None = None
     trend_profile_repository: TrendTopicProfileRepository | None = None
+    trend_candidates_repository: TrendCandidateRepository | None = None
 
 
 def parse_source_args(raw_args: str) -> tuple[str, str]:
@@ -243,6 +245,12 @@ def create_settings_router(context: SettingsContext) -> Router:
             "description": "Показывает trust score источников или подробности по одному source_id.",
             "where": "Обычно #General.",
             "example": "/source_quality 3",
+        },
+        "source_health": {
+            "syntax": "/source_health [source_id]",
+            "description": "Показывает health источников: HTTP ошибки, пустые фиды, дубликаты, consecutive failures.",
+            "where": "Обычно #General.",
+            "example": "/source_health 3",
         },
         "ingest_now": {
             "syntax": "/ingest_now",
@@ -449,6 +457,7 @@ def create_settings_router(context: SettingsContext) -> Router:
             "disable_source",
             "remove_source",
             "source_quality",
+            "source_health",
         },
         "Ingestion/обработка": {
             "ingest_now",
@@ -498,11 +507,29 @@ def create_settings_router(context: SettingsContext) -> Router:
             timezone_name=scheduler_timezone,
             workflow=context.workflow,
             settings_repo=context.repository,
+            peak_hours=getattr(
+                getattr(context.settings, "scheduler", None),
+                "autoplan_peak_hours",
+                [],
+            ),
+            peak_bonus=float(
+                getattr(
+                    getattr(context.settings, "scheduler", None),
+                    "autoplan_peak_bonus",
+                    0.0,
+                )
+            ),
+            topic_weights=getattr(
+                getattr(context.settings, "scheduler", None),
+                "autoplan_topic_weights",
+                {},
+            ),
         )
         if context.workflow is not None
         else None
     )
     trend_profiles_repo = context.trend_profile_repository or TrendTopicProfileRepository()
+    trend_candidates_repo = context.trend_candidates_repository or TrendCandidateRepository()
     trend_status_labels = {
         "PENDING": "ожидает",
         "APPROVED": "подтверждён",
@@ -559,6 +586,9 @@ def create_settings_router(context: SettingsContext) -> Router:
                     InlineKeyboardButton(text="Аналитика 24ч", callback_data=ops_data("act:analytics24")),
                 ],
                 [
+                    InlineKeyboardButton(text="Source health", callback_data=ops_data("act:source_health")),
+                ],
+                [
                     InlineKeyboardButton(text="Setup Wizard", callback_data=ops_data("page:setup")),
                 ],
                 [
@@ -606,6 +636,9 @@ def create_settings_router(context: SettingsContext) -> Router:
                 [
                     InlineKeyboardButton(text="Signals", callback_data=ops_data("tr:signals")),
                     InlineKeyboardButton(text="Topics", callback_data=ops_data("tr:topics")),
+                ],
+                [
+                    InlineKeyboardButton(text="Очередь кандидатов", callback_data=ops_data("page:trend_queue:1")),
                 ],
                 [
                     InlineKeyboardButton(text="Профили тем", callback_data=ops_data("page:trend_profiles:1")),
@@ -675,6 +708,11 @@ def create_settings_router(context: SettingsContext) -> Router:
             )
         if nav_row:
             keyboard_rows.append(nav_row)
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(text="Source health", callback_data=ops_data("act:source_health")),
+            ]
+        )
         keyboard_rows.append(
             [
                 InlineKeyboardButton(text="Назад", callback_data=ops_data("menu")),
@@ -840,6 +878,108 @@ def create_settings_router(context: SettingsContext) -> Router:
         keyboard_rows.append(
             [
                 InlineKeyboardButton(text="Назад", callback_data=ops_data("page:trends")),
+            ]
+        )
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    async def render_ops_trend_queue_page(
+        *,
+        page: int,
+        page_size: int = 4,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        requested_page = max(page, 1)
+        async with context.session_factory() as session:
+            async with session.begin():
+                total_articles = await trend_candidates_repo.count_pending_article_candidates(session)
+                total_sources = await trend_candidates_repo.count_pending_source_candidates(session)
+
+                total_pages_articles = max((total_articles + page_size - 1) // page_size, 1)
+                total_pages_sources = max((total_sources + page_size - 1) // page_size, 1)
+                total_pages = max(total_pages_articles, total_pages_sources, 1)
+                current_page = min(requested_page, total_pages)
+                offset = (current_page - 1) * page_size
+
+                article_rows = await trend_candidates_repo.list_pending_article_candidates(
+                    session,
+                    limit=page_size,
+                    offset=offset,
+                )
+                source_rows = await trend_candidates_repo.list_pending_source_candidates(
+                    session,
+                    limit=page_size,
+                    offset=offset,
+                )
+
+        lines = [
+            "Очередь trend-кандидатов (PENDING):",
+            f"Страница: {current_page}/{total_pages}",
+            f"Статей: {total_articles}, источников: {total_sources}",
+        ]
+        keyboard_rows: list[list[InlineKeyboardButton]] = []
+
+        lines.append("")
+        lines.append("Статьи:")
+        if not article_rows:
+            lines.append("- нет")
+        for row in article_rows:
+            lines.append(
+                f"A#{row.id} score={float(row.score):.2f} "
+                f"{_trim_text(row.title or row.url, 80)}"
+            )
+            keyboard_rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"A#{row.id} Во входящие",
+                        callback_data=ops_data(f"tr:qing:{row.id}:{current_page}"),
+                    ),
+                    InlineKeyboardButton(
+                        text="Отклонить",
+                        callback_data=ops_data(f"tr:qrej:{row.id}:{current_page}"),
+                    ),
+                ]
+            )
+
+        lines.append("")
+        lines.append("Источники:")
+        if not source_rows:
+            lines.append("- нет")
+        for row in source_rows:
+            lines.append(
+                f"S#{row.id} score={float(row.score):.2f} {row.domain}"
+            )
+            keyboard_rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"S#{row.id} Добавить",
+                        callback_data=ops_data(f"tr:qadd:{row.id}:{current_page}"),
+                    ),
+                    InlineKeyboardButton(
+                        text="Отклонить",
+                        callback_data=ops_data(f"tr:qsrej:{row.id}:{current_page}"),
+                    ),
+                ]
+            )
+
+        nav_row: list[InlineKeyboardButton] = []
+        if current_page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="←",
+                    callback_data=ops_data(f"page:trend_queue:{current_page - 1}"),
+                )
+            )
+        if current_page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="→",
+                    callback_data=ops_data(f"page:trend_queue:{current_page + 1}"),
+                )
+            )
+        if nav_row:
+            keyboard_rows.append(nav_row)
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(text="К разделу Тренды", callback_data=ops_data("page:trends")),
             ]
         )
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -2590,6 +2730,13 @@ def create_settings_router(context: SettingsContext) -> Router:
             return
 
         source_id = parse_positive_int(command.args if command and command.args else None)
+
+        def quality_health(tags: dict | None) -> tuple[dict, dict]:
+            payload = tags if isinstance(tags, dict) else {}
+            quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+            health = quality.get("health") if isinstance(quality.get("health"), dict) else {}
+            return quality, health
+
         async with context.session_factory() as session:
             async with session.begin():
                 if source_id is not None:
@@ -2601,8 +2748,7 @@ def create_settings_router(context: SettingsContext) -> Router:
                             text=f"Источник #{source_id} не найден.",
                         )
                         return
-                    tags = source.tags if isinstance(source.tags, dict) else {}
-                    quality = tags.get("quality") if isinstance(tags.get("quality"), dict) else {}
+                    quality, health = quality_health(source.tags)
                     await context.publisher.send_text(
                         chat_id=message.chat.id,
                         topic_id=message.message_thread_id,
@@ -2611,7 +2757,8 @@ def create_settings_router(context: SettingsContext) -> Router:
                             f"enabled: {source.enabled}\n"
                             f"trust_score: {float(source.trust_score):.2f}\n"
                             f"events_total: {quality.get('events_total', 0)}\n"
-                            f"last_event: {quality.get('last_event', '-')}"
+                            f"last_event: {quality.get('last_event', '-')}\n"
+                            f"consecutive_failures: {health.get('consecutive_failures', 0)}"
                         ),
                     )
                     return
@@ -2632,6 +2779,84 @@ def create_settings_router(context: SettingsContext) -> Router:
                 f"#{source.id} trust={float(source.trust_score):.2f} enabled={source.enabled} {source.name}"
             )
         await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text="\n".join(lines),
+        )
+
+    @router.message(Command("source_health"))
+    async def source_health(message: Message, command: CommandObject) -> None:
+        if not is_admin(message):
+            return
+
+        source_id = parse_positive_int(command.args if command and command.args else None)
+
+        def quality_health(tags: dict | None) -> tuple[dict, dict]:
+            payload = tags if isinstance(tags, dict) else {}
+            quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+            health = quality.get("health") if isinstance(quality.get("health"), dict) else {}
+            return quality, health
+
+        async with context.session_factory() as session:
+            async with session.begin():
+                if source_id is not None:
+                    source = await context.source_repository.get_by_id(session, source_id)
+                    if source is None:
+                        await context.publisher.send_text(
+                            chat_id=message.chat.id,
+                            topic_id=message.message_thread_id,
+                            text=f"Источник #{source_id} не найден.",
+                        )
+                        return
+                    quality, health = quality_health(source.tags)
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text=(
+                            f"Source health #{source.id}: {source.name}\n"
+                            f"enabled: {source.enabled}\n"
+                            f"trust_score: {float(source.trust_score or 0.0):.2f}\n"
+                            f"events_total: {quality.get('events_total', 0)}\n"
+                            f"last_event: {quality.get('last_event', '-')}\n"
+                            f"consecutive_failures: {health.get('consecutive_failures', 0)}\n"
+                            f"rss_http_errors: {health.get('rss_http_errors', 0)}\n"
+                            f"rss_http_403: {health.get('rss_http_403', 0)}\n"
+                            f"rss_empty: {health.get('rss_empty', 0)}\n"
+                            f"duplicates_total: {health.get('duplicates_total', 0)}\n"
+                            f"high_duplicate_rate_hits: {health.get('high_duplicate_rate_hits', 0)}"
+                        ),
+                    )
+                    return
+                sources = await context.source_repository.list_all(session)
+
+        if not sources:
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text="Источники не найдены.",
+            )
+            return
+
+        scored_rows: list[tuple[float, object, dict, dict]] = []
+        for source in sources:
+            quality, health = quality_health(source.tags)
+            failures = float(health.get("consecutive_failures", 0))
+            events = float(quality.get("events_total", 0))
+            trust = float(source.trust_score or 0.0)
+            risk = failures * 2.0 + max(-trust, 0.0) + min(events / 25.0, 2.0)
+            scored_rows.append((risk, source, quality, health))
+
+        scored_rows.sort(key=lambda item: item[0], reverse=True)
+        lines = [f"Source health: {len(scored_rows)} (top risk)"]
+        for risk, source, quality, health in scored_rows[:25]:
+            lines.append(
+                f"#{source.id} risk={risk:.2f} enabled={source.enabled} "
+                f"trust={float(source.trust_score or 0.0):.2f} "
+                f"fails={health.get('consecutive_failures', 0)} "
+                f"event={quality.get('last_event', '-')} {source.name}"
+            )
+
+        await send_paged_text(
             chat_id=message.chat.id,
             topic_id=message.message_thread_id,
             text="\n".join(lines),
@@ -3647,6 +3872,11 @@ def create_settings_router(context: SettingsContext) -> Router:
                         keyboard=build_ops_trends_keyboard(),
                     )
                     return
+                if page_name == "trend_queue":
+                    page = parse_positive_int(tokens[2] if len(tokens) >= 3 else "1") or 1
+                    text, keyboard = await render_ops_trend_queue_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
                 if page_name == "trend_profiles":
                     page = parse_positive_int(tokens[2] if len(tokens) >= 3 else "1") or 1
                     text, keyboard = await render_ops_trend_profiles_page(page=page)
@@ -3673,6 +3903,9 @@ def create_settings_router(context: SettingsContext) -> Router:
                     return
                 if act == "analytics24":
                     await analytics(proxy_message, SimpleNamespace(args="24"))
+                    return
+                if act == "source_health":
+                    await source_health(proxy_message, SimpleNamespace(args=None))
                     return
                 if act == "schedule_map":
                     await schedule_map(proxy_message, SimpleNamespace(args="48 30"))
@@ -3819,6 +4052,11 @@ def create_settings_router(context: SettingsContext) -> Router:
                     text, keyboard = await render_ops_trend_topics(hours=24, limit=8)
                     await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
                     return
+                if tr_action == "queue":
+                    page = parse_positive_int(tokens[2] if len(tokens) >= 3 else "1") or 1
+                    text, keyboard = await render_ops_trend_queue_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
                 if tr_action == "open":
                     topic_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
                     if topic_id is None:
@@ -3875,6 +4113,106 @@ def create_settings_router(context: SettingsContext) -> Router:
                         text=result.message,
                     )
                     text, keyboard = await render_ops_trend_topic_detail(topic_id)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if tr_action == "qing":
+                    candidate_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                    page = parse_positive_int(tokens[3] if len(tokens) >= 4 else "1") or 1
+                    if candidate_id is None:
+                        await safe_callback_answer(query, text="Некорректный candidate_id")
+                        return
+                    if context.trend_discovery is None:
+                        await context.publisher.send_text(
+                            chat_id=proxy_message.chat.id,
+                            topic_id=proxy_message.message_thread_id,
+                            text="Модуль trend discovery недоступен.",
+                        )
+                        return
+                    result = await context.trend_discovery.ingest_article_candidate(
+                        candidate_id=candidate_id,
+                        user_id=proxy_message.from_user.id if proxy_message.from_user else 0,
+                    )
+                    await context.publisher.send_text(
+                        chat_id=proxy_message.chat.id,
+                        topic_id=proxy_message.message_thread_id,
+                        text=result.message,
+                    )
+                    text, keyboard = await render_ops_trend_queue_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if tr_action == "qrej":
+                    candidate_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                    page = parse_positive_int(tokens[3] if len(tokens) >= 4 else "1") or 1
+                    if candidate_id is None:
+                        await safe_callback_answer(query, text="Некорректный candidate_id")
+                        return
+                    if context.trend_discovery is None:
+                        await context.publisher.send_text(
+                            chat_id=proxy_message.chat.id,
+                            topic_id=proxy_message.message_thread_id,
+                            text="Модуль trend discovery недоступен.",
+                        )
+                        return
+                    result = await context.trend_discovery.reject_article_candidate(
+                        candidate_id=candidate_id,
+                        user_id=proxy_message.from_user.id if proxy_message.from_user else 0,
+                    )
+                    await context.publisher.send_text(
+                        chat_id=proxy_message.chat.id,
+                        topic_id=proxy_message.message_thread_id,
+                        text=result.message,
+                    )
+                    text, keyboard = await render_ops_trend_queue_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if tr_action == "qadd":
+                    candidate_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                    page = parse_positive_int(tokens[3] if len(tokens) >= 4 else "1") or 1
+                    if candidate_id is None:
+                        await safe_callback_answer(query, text="Некорректный candidate_id")
+                        return
+                    if context.trend_discovery is None:
+                        await context.publisher.send_text(
+                            chat_id=proxy_message.chat.id,
+                            topic_id=proxy_message.message_thread_id,
+                            text="Модуль trend discovery недоступен.",
+                        )
+                        return
+                    result = await context.trend_discovery.add_source_candidate(
+                        candidate_id=candidate_id,
+                        user_id=proxy_message.from_user.id if proxy_message.from_user else 0,
+                    )
+                    await context.publisher.send_text(
+                        chat_id=proxy_message.chat.id,
+                        topic_id=proxy_message.message_thread_id,
+                        text=result.message,
+                    )
+                    text, keyboard = await render_ops_trend_queue_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if tr_action == "qsrej":
+                    candidate_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                    page = parse_positive_int(tokens[3] if len(tokens) >= 4 else "1") or 1
+                    if candidate_id is None:
+                        await safe_callback_answer(query, text="Некорректный candidate_id")
+                        return
+                    if context.trend_discovery is None:
+                        await context.publisher.send_text(
+                            chat_id=proxy_message.chat.id,
+                            topic_id=proxy_message.message_thread_id,
+                            text="Модуль trend discovery недоступен.",
+                        )
+                        return
+                    result = await context.trend_discovery.reject_source_candidate(
+                        candidate_id=candidate_id,
+                        user_id=proxy_message.from_user.id if proxy_message.from_user else 0,
+                    )
+                    await context.publisher.send_text(
+                        chat_id=proxy_message.chat.id,
+                        topic_id=proxy_message.message_thread_id,
+                        text=result.message,
+                    )
+                    text, keyboard = await render_ops_trend_queue_page(page=page)
                     await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
                     return
         except Exception:

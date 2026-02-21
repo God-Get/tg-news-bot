@@ -51,6 +51,29 @@ def test_render_card_text_uses_state_override_for_transition() -> None:
     assert "Schedule at: 2026-02-17 10:00 UTC" in text
 
 
+def test_render_card_text_shows_hot_trust_and_top_reasons() -> None:
+    draft = _make_draft(
+        state=DraftState.READY,
+        score=7.2,
+        score_reasons={
+            "hot_score": 1.4,
+            "trust_score": 2.5,
+            "kw:AI": 1.3,
+            "trend:quantum": 1.1,
+            "domain:nature.com": 0.7,
+            "length": 5000,
+        },
+    )
+
+    text = render_card_text(draft)
+
+    assert "Hot score: 1.40" in text
+    assert "Trust score: 2.50" in text
+    assert "Reasons:" in text
+    assert "kw(ai)=+1.30" in text
+    assert "trend(quantum)=+1.10" in text
+
+
 def test_render_post_content_formats_title_text_hashtags_and_source() -> None:
     draft = _make_draft(
         state=DraftState.INBOX,

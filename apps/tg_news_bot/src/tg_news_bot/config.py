@@ -288,6 +288,7 @@ class SourceQualitySettings(BaseModel):
     auto_disable_enabled: bool = True
     auto_disable_threshold: float = Field(-4.0, ge=-20.0, le=0.0)
     min_events_for_auto_disable: int = Field(12, ge=1, le=200)
+    consecutive_failures_disable_threshold: int = Field(8, ge=2, le=200)
     created_delta: float = Field(0.25, ge=0.0, le=5.0)
     duplicate_delta: float = Field(-0.2, ge=-5.0, le=0.0)
     blocked_delta: float = Field(-0.8, ge=-5.0, le=0.0)
@@ -296,6 +297,10 @@ class SourceQualitySettings(BaseModel):
     invalid_entry_delta: float = Field(-0.15, ge=-5.0, le=0.0)
     unsafe_delta: float = Field(-1.0, ge=-5.0, le=0.0)
     near_duplicate_delta: float = Field(-0.5, ge=-5.0, le=0.0)
+    rss_http_error_delta: float = Field(-0.4, ge=-5.0, le=0.0)
+    rss_http_403_delta: float = Field(-0.8, ge=-5.0, le=0.0)
+    rss_empty_delta: float = Field(-0.25, ge=-5.0, le=0.0)
+    high_duplicate_rate_delta: float = Field(-0.6, ge=-5.0, le=0.0)
 
 
 class SemanticDedupSettings(BaseModel):
@@ -332,6 +337,14 @@ class ContentSafetySettings(BaseModel):
     )
 
 
+class QualityGateSettings(BaseModel):
+    enabled: bool = True
+    min_meaningful_chars: int = Field(120, ge=20, le=3000)
+    min_words: int = Field(30, ge=5, le=500)
+    fallback_snippet_chars: int = Field(800, ge=100, le=4000)
+    max_paywall_marker_hits: int = Field(2, ge=1, le=20)
+
+
 class AnalyticsSettings(BaseModel):
     default_window_hours: int = Field(24, ge=1, le=720)
     max_window_hours: int = Field(720, ge=24, le=8760)
@@ -356,6 +369,21 @@ class SchedulerSettings(BaseModel):
     max_publish_attempts: int = Field(3, ge=1, le=20)
     retry_backoff_seconds: int = Field(60, ge=5, le=3600)
     recover_failed_after_seconds: int = Field(300, ge=10, le=86400)
+    autoplan_peak_hours: list[int] = Field(default_factory=lambda: [9, 12, 18, 21])
+    autoplan_peak_bonus: float = Field(0.6, ge=0.0, le=5.0)
+    autoplan_topic_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "ai": 0.7,
+            "space": 0.55,
+            "science": 0.45,
+            "energy": 0.35,
+            "gaming": 0.6,
+            "programming": 0.5,
+            "gadgets": 0.45,
+            "movies": 0.3,
+            "quantum": 0.55,
+        }
+    )
 
     @field_validator("timezone")
     @classmethod
@@ -365,6 +393,32 @@ class SchedulerSettings(BaseModel):
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"Unknown timezone: {value}") from exc
         return value
+
+    @field_validator("autoplan_peak_hours")
+    @classmethod
+    def validate_autoplan_peak_hours(cls, value: list[int]) -> list[int]:
+        cleaned: list[int] = []
+        seen: set[int] = set()
+        for raw_hour in value:
+            hour = int(raw_hour)
+            if hour < 0 or hour > 23:
+                continue
+            if hour in seen:
+                continue
+            seen.add(hour)
+            cleaned.append(hour)
+        return cleaned
+
+    @field_validator("autoplan_topic_weights")
+    @classmethod
+    def validate_autoplan_topic_weights(cls, value: dict[str, float]) -> dict[str, float]:
+        result: dict[str, float] = {}
+        for key, raw_weight in value.items():
+            topic = str(key).strip().lower()
+            if not topic:
+                continue
+            result[topic] = max(min(float(raw_weight), 5.0), -5.0)
+        return result
 
 
 class LLMSettings(BaseModel):
@@ -480,6 +534,7 @@ class Settings(BaseSettings):
     source_quality: SourceQualitySettings = SourceQualitySettings()
     semantic_dedup: SemanticDedupSettings = SemanticDedupSettings()
     content_safety: ContentSafetySettings = ContentSafetySettings()
+    quality_gate: QualityGateSettings = QualityGateSettings()
     analytics: AnalyticsSettings = AnalyticsSettings()
     images: ImageFilterSettings = ImageFilterSettings()
     scheduler: SchedulerSettings = SchedulerSettings()

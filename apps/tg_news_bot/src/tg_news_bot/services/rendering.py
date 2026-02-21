@@ -204,18 +204,82 @@ def render_card_text(
 ) -> str:
     effective_state = state or draft.state
     score_text = f"{draft.score:.2f}" if draft.score is not None else "N/A"
+    hot_score = _extract_hot_score(draft)
+    trust_score = _extract_trust_score(draft)
     lines = [
         f"Draft #{draft.id}",
         f"State: {effective_state}",
         f"Score: {score_text}",
+        f"Hot score: {hot_score:.2f}" if hot_score is not None else "Hot score: N/A",
+        f"Trust score: {trust_score:.2f}" if trust_score is not None else "Trust score: N/A",
         f"Domain: {draft.domain or '-'}",
         f"Image: {draft.image_status}",
         f"URL: {draft.normalized_url}",
     ]
+    top_reasons = _top_scoring_reasons(draft, limit=3)
+    if top_reasons:
+        lines.append("Reasons: " + "; ".join(top_reasons))
     if effective_state == DraftState.SCHEDULED:
         schedule_text = _format_schedule_at(schedule_at) if schedule_at else "-"
         lines.append(f"Schedule at: {schedule_text}")
     return "\n".join(lines)
+
+
+def _extract_hot_score(draft: Draft) -> float | None:
+    reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+    raw = reasons.get("hot_score")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+
+    trend_total = 0.0
+    for key, value in reasons.items():
+        if not isinstance(value, (int, float)):
+            continue
+        if str(key).startswith("trend:"):
+            trend_total += float(value)
+    return trend_total if trend_total > 0 else 0.0
+
+
+def _extract_trust_score(draft: Draft) -> float | None:
+    reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+    raw = reasons.get("trust_score")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
+
+
+def _top_scoring_reasons(draft: Draft, *, limit: int) -> list[str]:
+    reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+    candidates: list[tuple[str, float]] = []
+    for key, value in reasons.items():
+        if not isinstance(value, (int, float)):
+            continue
+        reason_key = str(key)
+        if reason_key in {"length", "age_hours", "hot_score", "trust_score", "safety_quality"}:
+            continue
+        if reason_key.startswith("auto_"):
+            continue
+        if reason_key in {"manual_hashtags"}:
+            continue
+        candidates.append((reason_key, float(value)))
+
+    candidates.sort(key=lambda item: (abs(item[1]), item[0]), reverse=True)
+    result: list[str] = []
+    for key, value in candidates[: max(limit, 0)]:
+        result.append(f"{_reason_label(key)}={value:+.2f}")
+    return result
+
+
+def _reason_label(key: str) -> str:
+    if key.startswith("kw_title:"):
+        return f"title_kw({key.removeprefix('kw_title:').lower()})"
+    if key.startswith("kw:"):
+        return f"kw({key.removeprefix('kw:').lower()})"
+    if key.startswith("trend:"):
+        return f"trend({key.removeprefix('trend:').lower()})"
+    if key.startswith("domain:"):
+        return f"domain({key.removeprefix('domain:').lower()})"
+    return key
 
 
 def _split_title_body(draft: Draft) -> tuple[str, str]:

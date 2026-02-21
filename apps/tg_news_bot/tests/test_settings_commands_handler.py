@@ -96,6 +96,8 @@ class _TrendDiscoverySpy:
     scan_calls: list[dict] = field(default_factory=list)
     ingest_calls: list[int] = field(default_factory=list)
     add_source_calls: list[int] = field(default_factory=list)
+    reject_article_calls: list[int] = field(default_factory=list)
+    reject_source_calls: list[int] = field(default_factory=list)
 
     async def scan(self, *, hours=None, limit=None):  # noqa: ANN001
         self.scan_calls.append({"hours": hours, "limit": limit})
@@ -117,6 +119,14 @@ class _TrendDiscoverySpy:
     async def add_source_candidate(self, *, candidate_id: int, user_id: int):  # noqa: ANN001
         self.add_source_calls.append(candidate_id)
         return SimpleNamespace(ok=True, message=f"source {candidate_id}")
+
+    async def reject_article_candidate(self, *, candidate_id: int, user_id: int):  # noqa: ANN001
+        self.reject_article_calls.append(candidate_id)
+        return SimpleNamespace(ok=True, message=f"reject article {candidate_id}")
+
+    async def reject_source_candidate(self, *, candidate_id: int, user_id: int):  # noqa: ANN001
+        self.reject_source_calls.append(candidate_id)
+        return SimpleNamespace(ok=True, message=f"reject source {candidate_id}")
 
 
 @dataclass
@@ -269,6 +279,39 @@ class _TrendProfileRepositorySpy:
 
 
 @dataclass
+class _TrendArticleCandidateRow:
+    id: int
+    score: float
+    title: str | None
+    url: str
+
+
+@dataclass
+class _TrendSourceCandidateRow:
+    id: int
+    score: float
+    domain: str
+
+
+@dataclass
+class _TrendCandidateRepositorySpy:
+    article_rows: list[_TrendArticleCandidateRow] = field(default_factory=list)
+    source_rows: list[_TrendSourceCandidateRow] = field(default_factory=list)
+
+    async def count_pending_article_candidates(self, session):  # noqa: ANN001
+        return len(self.article_rows)
+
+    async def count_pending_source_candidates(self, session):  # noqa: ANN001
+        return len(self.source_rows)
+
+    async def list_pending_article_candidates(self, session, *, limit: int, offset: int):  # noqa: ANN001
+        return list(self.article_rows[offset : offset + limit])
+
+    async def list_pending_source_candidates(self, session, *, limit: int, offset: int):  # noqa: ANN001
+        return list(self.source_rows[offset : offset + limit])
+
+
+@dataclass
 class _BotSettingsRow:
     group_chat_id: int | None = None
     inbox_topic_id: int | None = None
@@ -323,6 +366,7 @@ def _router_and_handler_by_name(
     session_factory=None,  # noqa: ANN001
     repository=None,  # noqa: ANN001
     trend_profile_repository=None,  # noqa: ANN001
+    trend_candidates_repository=None,  # noqa: ANN001
 ):
     context = SettingsContext(
         settings=SimpleNamespace(
@@ -344,6 +388,7 @@ def _router_and_handler_by_name(
         scheduled_repo=scheduled_repo,
         draft_repo=draft_repo,
         trend_profile_repository=trend_profile_repository,
+        trend_candidates_repository=trend_candidates_repository,
     )
     router = create_settings_router(context)
     for handler in router.message.handlers:
@@ -361,6 +406,7 @@ def _router_and_callback_handler(
     session_factory=None,  # noqa: ANN001
     repository=None,  # noqa: ANN001
     trend_profile_repository=None,  # noqa: ANN001
+    trend_candidates_repository=None,  # noqa: ANN001
 ):
     context = SettingsContext(
         settings=SimpleNamespace(
@@ -379,6 +425,7 @@ def _router_and_callback_handler(
         workflow=SimpleNamespace(),
         trend_discovery=trend_discovery,
         trend_profile_repository=trend_profile_repository,
+        trend_candidates_repository=trend_candidates_repository,
     )
     router = create_settings_router(context)
     for handler in router.callback_query.handlers:
@@ -417,6 +464,7 @@ async def test_commands_help_contains_syntax_lines() -> None:
     assert "/trend_profile_add <name>|<seed_csv>" in text
     assert "/trend_theme_add <name>|<seed_csv>" in text
     assert "/trend_theme_list [all]" in text
+    assert "/source_health [source_id]" in text
     assert "/cancel" in text
     assert "Синтаксис:" in text
     assert "Что делает:" in text
@@ -551,6 +599,72 @@ async def test_ops_menu_trend_profile_toggle_updates_state() -> None:
     assert "Профиль #7 переключен: ON" in publisher.sent[-1]["text"]
     assert publisher.edits
     assert "#7 [ON] Gadgets" in publisher.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_trend_queue_renders_candidates() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    candidates_repo = _TrendCandidateRepositorySpy(
+        article_rows=[
+            _TrendArticleCandidateRow(
+                id=11,
+                score=3.2,
+                title="Quantum networking update",
+                url="https://example.com/a11",
+            ),
+        ],
+        source_rows=[
+            _TrendSourceCandidateRow(
+                id=21,
+                score=2.4,
+                domain="reddit.com",
+            ),
+        ],
+    )
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+        trend_candidates_repository=candidates_repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    query = _CallbackQuery(data="ops:page:trend_queue:1")
+    await handler(query)
+
+    assert publisher.edits
+    text = publisher.edits[-1]["text"]
+    assert "Очередь trend-кандидатов" in text
+    assert "A#11" in text
+    assert "S#21" in text
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_trend_queue_actions_call_discovery_methods() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    trend_discovery = _TrendDiscoverySpy()
+    candidates_repo = _TrendCandidateRepositorySpy(
+        article_rows=[_TrendArticleCandidateRow(id=15, score=2.8, title="AI model", url="https://x/15")],
+        source_rows=[_TrendSourceCandidateRow(id=77, score=2.1, domain="hn.com")],
+    )
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+        trend_discovery=trend_discovery,
+        trend_candidates_repository=candidates_repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    await handler(_CallbackQuery(data="ops:tr:qing:15:1"))
+    await handler(_CallbackQuery(data="ops:tr:qrej:15:1"))
+    await handler(_CallbackQuery(data="ops:tr:qadd:77:1"))
+    await handler(_CallbackQuery(data="ops:tr:qsrej:77:1"))
+
+    assert trend_discovery.ingest_calls == [15]
+    assert trend_discovery.reject_article_calls == [15]
+    assert trend_discovery.add_source_calls == [77]
+    assert trend_discovery.reject_source_calls == [77]
 
 
 @pytest.mark.asyncio
@@ -877,6 +991,59 @@ async def test_list_sources_splits_large_response_into_pages() -> None:
     assert publisher.sent[0]["text"].startswith("Источники:")
     for sent in publisher.sent:
         assert len(sent["text"]) <= 3500
+
+
+@pytest.mark.asyncio
+async def test_source_health_reports_risk_order() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    source_rows = [
+        SimpleNamespace(
+            id=1,
+            enabled=True,
+            trust_score=1.2,
+            name="Good source",
+            tags={"quality": {"events_total": 10, "last_event": "created", "health": {"consecutive_failures": 0}}},
+        ),
+        SimpleNamespace(
+            id=2,
+            enabled=False,
+            trust_score=-2.0,
+            name="Risky source",
+            tags={"quality": {"events_total": 30, "last_event": "rss_http_403", "health": {"consecutive_failures": 6}}},
+        ),
+    ]
+    context = SettingsContext(
+        settings=SimpleNamespace(
+            admin_user_id=10,
+            trend_discovery=SimpleNamespace(default_window_hours=24, mode="suggest"),
+            analytics=SimpleNamespace(default_window_hours=24, max_window_hours=240),
+            post_formatting=SimpleNamespace(hashtag_mode="both"),
+            scheduler=SimpleNamespace(timezone="UTC"),
+            internet_scoring=SimpleNamespace(enabled=True),
+        ),
+        session_factory=_dummy_session_factory,
+        repository=SimpleNamespace(),
+        source_repository=_SourceRepositorySpy(rows=source_rows),
+        publisher=publisher,
+        ingestion_runner=ingestion,
+        workflow=SimpleNamespace(),
+    )
+    router = create_settings_router(context)
+    handler = None
+    for item in router.message.handlers:
+        if item.callback.__name__ == "source_health":
+            handler = item.callback
+            break
+    assert handler is not None
+
+    await handler(_Message(), SimpleNamespace(args=None))
+
+    assert publisher.sent
+    text = "\n".join(item["text"] for item in publisher.sent)
+    assert "Source health" in text
+    assert "#2" in text
+    assert "fails=6" in text
 
 
 @pytest.mark.asyncio

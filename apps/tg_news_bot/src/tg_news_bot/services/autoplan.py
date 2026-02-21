@@ -40,6 +40,7 @@ class AutoPlanDraft:
     score: float
     created_at: datetime
     source_trust: float
+    topic_hint: str | None = None
 
 
 @dataclass(slots=True)
@@ -156,31 +157,52 @@ def _is_quiet_hour(value: datetime, *, start_hour: int, end_hour: int) -> bool:
     return hour >= start_hour or hour < end_hour
 
 
-def _priority_for_draft(draft: AutoPlanDraft, *, now_utc: datetime) -> tuple[float, str]:
+def _priority_for_draft(
+    draft: AutoPlanDraft,
+    *,
+    now_utc: datetime,
+    topic_weights: dict[str, float] | None = None,
+) -> tuple[float, str]:
     score = float(draft.score or 0.0)
     age_hours = max(0.0, (now_utc - _to_utc(draft.created_at)).total_seconds() / 3600.0)
     freshness_boost = max(0.0, 1.25 - age_hours / 24.0)
     trust_component = max(-1.0, min(float(draft.source_trust or 0.0), 5.0))
     trust_boost = trust_component * 0.2
-    priority = score + freshness_boost + trust_boost
+    topic = (draft.topic_hint or "").strip().lower()
+    topic_boost = float((topic_weights or {}).get(topic, 0.0))
+    priority = score + freshness_boost + trust_boost + topic_boost
     reason = (
         f"score={score:.2f}; freshness={freshness_boost:.2f}; "
-        f"source_trust={trust_component:.2f}"
+        f"source_trust={trust_component:.2f}; topic={topic or '-'}:{topic_boost:.2f}"
     )
     return priority, reason
 
 
-def _find_next_slot(
+def _slot_peak_bonus(
+    candidate: datetime,
+    *,
+    peak_hours: list[int] | None,
+    peak_bonus: float,
+) -> float:
+    if peak_bonus <= 0:
+        return 0.0
+    if not peak_hours:
+        return 0.0
+    return float(peak_bonus) if candidate.hour in set(peak_hours) else 0.0
+
+
+def _iter_valid_slots(
     *,
     now_local: datetime,
     end_local: datetime,
     occupied_local: list[datetime],
     daily_counts: dict[datetime.date, int],
     rules: AutoPlanRules,
-) -> datetime | None:
+) -> list[datetime]:
     candidate = _align_to_step(now_local, rules.slot_step_minutes)
     step = timedelta(minutes=rules.slot_step_minutes)
     min_gap_seconds = rules.min_gap_minutes * 60
+    valid: list[datetime] = []
 
     while candidate <= end_local:
         if _is_quiet_hour(
@@ -203,9 +225,10 @@ def _find_next_slot(
             candidate += step
             continue
 
-        return candidate
+        valid.append(candidate)
+        candidate += step
 
-    return None
+    return valid
 
 
 def build_autoplan(
@@ -216,6 +239,9 @@ def build_autoplan(
     now_utc: datetime,
     limit: int,
     hours_override: int | None = None,
+    peak_hours: list[int] | None = None,
+    peak_bonus: float = 0.0,
+    topic_weights: dict[str, float] | None = None,
 ) -> AutoPlanResult:
     tz = ZoneInfo(rules.timezone_name)
     window_hours = _bounded_int(
@@ -241,7 +267,11 @@ def build_autoplan(
 
     ranked: list[tuple[float, AutoPlanDraft, str]] = []
     for draft in drafts:
-        priority, reason = _priority_for_draft(draft, now_utc=now_utc)
+        priority, reason = _priority_for_draft(
+            draft,
+            now_utc=now_utc,
+            topic_weights=topic_weights,
+        )
         ranked.append((priority, draft, reason))
     ranked.sort(key=lambda item: item[0], reverse=True)
 
@@ -251,24 +281,40 @@ def build_autoplan(
     for priority, draft, reason in ranked:
         if len(scheduled) >= safe_limit:
             break
-        slot_local = _find_next_slot(
+        candidates = _iter_valid_slots(
             now_local=now_local,
             end_local=end_local,
             occupied_local=occupied_local,
             daily_counts=daily_counts,
             rules=rules,
         )
-        if slot_local is None:
+        if not candidates:
             unscheduled.append(draft.draft_id)
             continue
+        best_slot: datetime | None = None
+        best_score = -10_000.0
+        for candidate in candidates[:96]:
+            wait_hours = max((candidate - now_local).total_seconds() / 3600.0, 0.0)
+            score = _slot_peak_bonus(candidate, peak_hours=peak_hours, peak_bonus=peak_bonus) - (
+                wait_hours * 0.03
+            )
+            if best_slot is None or score > best_score:
+                best_slot = candidate
+                best_score = score
+
+        if best_slot is None:
+            unscheduled.append(draft.draft_id)
+            continue
+        slot_local = best_slot
         occupied_local.append(slot_local)
         daily_counts[slot_local.date()] = daily_counts.get(slot_local.date(), 0) + 1
+        slot_bonus = _slot_peak_bonus(slot_local, peak_hours=peak_hours, peak_bonus=peak_bonus)
         scheduled.append(
             AutoPlanEntry(
                 draft_id=draft.draft_id,
                 schedule_at=slot_local.astimezone(timezone.utc),
-                priority=priority,
-                reason=reason,
+                priority=priority + slot_bonus,
+                reason=f"{reason}; peak_bonus={slot_bonus:.2f}",
             )
         )
 
@@ -289,11 +335,21 @@ class AutoPlanService:
         timezone_name: str,
         workflow: DraftWorkflowService | None = None,
         settings_repo: BotSettingsRepository | None = None,
+        peak_hours: list[int] | None = None,
+        peak_bonus: float = 0.0,
+        topic_weights: dict[str, float] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._workflow = workflow
         self._timezone_name = timezone_name
         self._settings_repo = settings_repo or BotSettingsRepository()
+        self._peak_hours = _normalize_peak_hours(peak_hours)
+        self._peak_bonus = max(float(peak_bonus), 0.0)
+        self._topic_weights = {
+            str(key).strip().lower(): float(value)
+            for key, value in (topic_weights or {}).items()
+            if str(key).strip()
+        }
         self._log = get_logger(__name__)
 
     async def get_rules(self) -> AutoPlanRules:
@@ -362,6 +418,7 @@ class AutoPlanService:
                     if item.source_id is not None
                     else 0.0
                 ),
+                topic_hint=_extract_primary_topic_hint(item),
             )
             for item in ready_drafts
         ]
@@ -372,6 +429,9 @@ class AutoPlanService:
             now_utc=now_utc,
             limit=safe_limit,
             hours_override=hours,
+            peak_hours=self._peak_hours,
+            peak_bonus=self._peak_bonus,
+            topic_weights=self._topic_weights,
         )
 
     async def apply(
@@ -420,3 +480,31 @@ def render_rules(rules: AutoPlanRules) -> str:
         f"horizon_hours: {rules.horizon_hours}"
     )
 
+
+def _extract_primary_topic_hint(draft: Draft) -> str | None:
+    reasons = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+    topics_raw = reasons.get("auto_topics")
+    if not isinstance(topics_raw, list):
+        return None
+    for item in topics_raw:
+        topic = str(item).strip().lower()
+        if topic:
+            return topic
+    return None
+
+
+def _normalize_peak_hours(values: list[int] | None) -> list[int]:
+    seen: set[int] = set()
+    normalized: list[int] = []
+    for raw in values or []:
+        try:
+            hour = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if hour < 0 or hour > 23:
+            continue
+        if hour in seen:
+            continue
+        seen.add(hour)
+        normalized.append(hour)
+    return normalized

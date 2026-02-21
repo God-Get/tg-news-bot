@@ -12,7 +12,11 @@ from tg_news_bot.ports.publisher import (
     PublisherNotModified,
     PublisherPort,
 )
-from tg_news_bot.config import ContentSafetySettings, PostFormattingSettings
+from tg_news_bot.config import (
+    ContentSafetySettings,
+    PostFormattingSettings,
+    QualityGateSettings,
+)
 from tg_news_bot.db.models import (
     BotSettings,
     Draft,
@@ -36,6 +40,7 @@ from tg_news_bot.services.edit_sessions import EditSessionService
 from tg_news_bot.services.rendering import render_card_text, render_post_content
 from tg_news_bot.services.content_safety import ContentSafetyService
 from tg_news_bot.services.metrics import metrics
+from tg_news_bot.services.quality_gate import QualityGateService
 from tg_news_bot.services.scheduling import ScheduleService
 from tg_news_bot.services.source_text import sanitize_source_text
 from tg_news_bot.services.text_generation import TextPipeline, compose_post_text
@@ -59,6 +64,7 @@ class DraftWorkflowService:
         article_repo: ArticleRepository | None = None,
         text_pipeline: TextPipeline | None = None,
         content_safety: ContentSafetyService | None = None,
+        quality_gate: QualityGateService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._publisher = publisher
@@ -73,6 +79,7 @@ class DraftWorkflowService:
         self._article_repo = article_repo or ArticleRepository()
         self._text_pipeline = text_pipeline
         self._content_safety = content_safety or ContentSafetyService(ContentSafetySettings())
+        self._quality_gate = quality_gate or QualityGateService(QualityGateSettings())
 
     async def transition(self, request: TransitionRequest) -> Draft:
         async with self._session_factory() as session:
@@ -97,7 +104,18 @@ class DraftWorkflowService:
                 if request.action == DraftAction.CANCEL_SCHEDULE:
                     await self._schedule_service.cancel(session, draft_id=draft.id)
                 if request.action == DraftAction.TO_READY:
-                    self._ensure_ready_content_is_safe(draft)
+                    quality = self._quality_gate.evaluate(
+                        current_text=draft.post_text_ru,
+                        title=draft.title_en,
+                        source_text=draft.extracted_text,
+                    )
+                    if quality.text:
+                        draft.post_text_ru = quality.text
+                    self._annotate_quality_gate(draft, quality.reasons)
+                    if quality.should_archive:
+                        target_state = DraftState.ARCHIVE
+                    else:
+                        self._ensure_ready_content_is_safe(draft)
 
                 if request.action in {DraftAction.PUBLISH_NOW, DraftAction.REPOST}:
                     try:
@@ -503,6 +521,16 @@ class DraftWorkflowService:
             return
         reason_preview = ",".join(check.reasons[:4]) if check.reasons else "unknown"
         raise ValueError(f"content_safety_failed:{reason_preview}")
+
+    @staticmethod
+    def _annotate_quality_gate(draft: Draft, reasons: list[str]) -> None:
+        payload = draft.score_reasons if isinstance(draft.score_reasons, dict) else {}
+        updated = dict(payload)
+        if reasons:
+            updated["quality_gate"] = reasons[:6]
+        else:
+            updated.pop("quality_gate", None)
+        draft.score_reasons = updated if updated else None
 
     @staticmethod
     def _topic_hints_from_tags(source_tags: dict | None) -> list[str]:

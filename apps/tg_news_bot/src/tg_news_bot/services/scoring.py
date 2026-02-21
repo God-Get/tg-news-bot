@@ -30,6 +30,7 @@ class ScoringService:
     ) -> ScoreResult:
         score = 0.0
         reasons: dict[str, float | str] = {}
+        hot_score = 0.0
 
         if not text:
             reasons["no_text"] = -2.0
@@ -97,6 +98,7 @@ class ScoringService:
                     applied = float(boost)
                     score += applied
                     reasons[f"trend:{keyword_lc}"] = applied
+                    hot_score += applied
                     trend_applied += 1
                 if trend_applied >= 6:
                     break
@@ -106,5 +108,9 @@ class ScoringService:
             trust_boost = trust * 0.15
             score += trust_boost
             reasons["source_trust"] = trust_boost
+            reasons["trust_boost"] = trust_boost
+            reasons["trust_score"] = trust
+
+        reasons["hot_score"] = hot_score
 
         return ScoreResult(score=score, reasons=reasons)

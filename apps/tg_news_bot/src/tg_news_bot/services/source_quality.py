@@ -15,9 +15,11 @@ from tg_news_bot.repositories.sources import SourceRepository
 @dataclass(slots=True)
 class SourceQualityResult:
     source_id: int
+    source_name: str
     trust_score: float
     auto_disabled: bool
     events_total: int
+    consecutive_failures: int
 
 
 class SourceQualityService:
@@ -50,9 +52,43 @@ class SourceQualityService:
         tags = source.tags if isinstance(source.tags, dict) else {}
         quality = tags.get("quality") if isinstance(tags.get("quality"), dict) else {}
         events = quality.get("events") if isinstance(quality.get("events"), dict) else {}
+        health = quality.get("health") if isinstance(quality.get("health"), dict) else {}
 
         events[event] = int(events.get(event, 0)) + 1
         events_total = int(quality.get("events_total", 0)) + 1
+        consecutive_failures = int(health.get("consecutive_failures", 0))
+        if event == "created":
+            consecutive_failures = 0
+        elif event in {
+            "rss_http_error",
+            "rss_http_403",
+            "rss_empty",
+            "no_html",
+            "invalid_entry",
+            "blocked",
+            "unsafe",
+            "low_score",
+            "high_duplicate_rate",
+        }:
+            consecutive_failures += 1
+        elif event in {"duplicate", "near_duplicate"}:
+            consecutive_failures = max(consecutive_failures, 1)
+
+        if event == "rss_http_error":
+            health["rss_http_errors"] = int(health.get("rss_http_errors", 0)) + 1
+        if event == "rss_http_403":
+            health["rss_http_403"] = int(health.get("rss_http_403", 0)) + 1
+        if event == "rss_empty":
+            health["rss_empty"] = int(health.get("rss_empty", 0)) + 1
+        if event == "duplicate":
+            health["duplicates_total"] = int(health.get("duplicates_total", 0)) + 1
+        if event == "created":
+            health["created_total"] = int(health.get("created_total", 0)) + 1
+        if event == "high_duplicate_rate":
+            health["high_duplicate_rate_hits"] = int(health.get("high_duplicate_rate_hits", 0)) + 1
+
+        health["consecutive_failures"] = consecutive_failures
+        quality["health"] = health
         quality["events"] = events
         quality["events_total"] = events_total
         quality["last_event"] = event
@@ -79,14 +115,31 @@ class SourceQualityService:
                 trust_score=source.trust_score,
                 events_total=events_total,
             )
+        elif (
+            self._settings.auto_disable_enabled
+            and source.enabled
+            and consecutive_failures >= self._settings.consecutive_failures_disable_threshold
+        ):
+            source.enabled = False
+            auto_disabled = True
+            quality["auto_disabled"] = True
+            quality["auto_disabled_at"] = datetime.now(timezone.utc).isoformat()
+            quality["auto_disabled_reason"] = "consecutive_failures"
+            self._log.warning(
+                "source_quality.auto_disabled_consecutive_failures",
+                source_id=source_id,
+                consecutive_failures=consecutive_failures,
+            )
         source.tags = tags
         await session.flush()
 
         return SourceQualityResult(
             source_id=source_id,
+            source_name=source.name,
             trust_score=float(source.trust_score),
             auto_disabled=auto_disabled,
             events_total=events_total,
+            consecutive_failures=consecutive_failures,
         )
 
     def _delta_for_event(self, event: str) -> float:
@@ -99,5 +152,9 @@ class SourceQualityService:
             "invalid_entry": self._settings.invalid_entry_delta,
             "unsafe": self._settings.unsafe_delta,
             "near_duplicate": self._settings.near_duplicate_delta,
+            "rss_http_error": self._settings.rss_http_error_delta,
+            "rss_http_403": self._settings.rss_http_403_delta,
+            "rss_empty": self._settings.rss_empty_delta,
+            "high_duplicate_rate": self._settings.high_duplicate_rate_delta,
         }
         return float(mapping.get(event, 0.0))
