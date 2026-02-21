@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -69,6 +70,7 @@ class _PublisherSpy:
 @dataclass
 class _IngestionRunnerSpy:
     result: object | None = None
+    run_once_result: object | None = None
     calls: list[dict] = field(default_factory=list)
     run_once_calls: list[set[int] | None] = field(default_factory=list)
 
@@ -84,6 +86,8 @@ class _IngestionRunnerSpy:
 
     async def run_once(self, *, source_ids=None):  # noqa: ANN001
         self.run_once_calls.append(source_ids)
+        if self.run_once_result is not None:
+            return self.run_once_result
         return SimpleNamespace(
             sources_total=1,
             entries_total=1,
@@ -922,6 +926,58 @@ async def test_ingest_url_accepts_optional_source_id() -> None:
         }
     ]
     assert "source #3" in publisher.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ingest_now_reports_no_entries_hint() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy(
+        run_once_result=SimpleNamespace(
+            sources_total=1,
+            entries_total=0,
+            created=0,
+            duplicates=0,
+            skipped_low_score=0,
+            skipped_invalid_entry=0,
+            skipped_no_html=0,
+            skipped_unsafe=0,
+            skipped_blocked=0,
+            skipped_rate_limited=0,
+            rss_fetch_errors=0,
+        )
+    )
+    _, handler = _router_and_handler_by_name(
+        "ingest_now",
+        publisher=publisher,
+        ingestion=ingestion,
+    )
+
+    await handler(_Message())
+
+    assert publisher.sent
+    text = publisher.sent[-1]["text"]
+    assert "Новых RSS entries не найдено" in text
+    assert "RSS URL" in text
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_ingest_now_reopens_menu_after_background_job() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+    )
+
+    await handler(_CallbackQuery(data="ops:act:ingest_now"))
+
+    for _ in range(8):
+        await asyncio.sleep(0)
+
+    assert publisher.edits
+    assert "Ingest запущен в фоне" in publisher.edits[-1]["text"]
+    assert any("Запускаю RSS ingestion" in item["text"] for item in publisher.sent)
+    assert any("Операционный центр" in item["text"] for item in publisher.sent)
 
 
 @pytest.mark.asyncio

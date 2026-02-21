@@ -593,6 +593,24 @@ def create_settings_router(context: SettingsContext) -> Router:
             if previous_message_id is not None and previous_message_id != new_message_id:
                 await safe_delete_message(chat_id=chat_id, message_id=previous_message_id)
 
+    async def run_background_with_menu(
+        *,
+        job_name: str,
+        proxy_message: Message | SimpleNamespace,
+        action_coro,
+    ) -> None:
+        async def _job() -> None:
+            await action_coro
+            try:
+                await open_ops_menu(
+                    chat_id=proxy_message.chat.id,
+                    topic_id=proxy_message.message_thread_id,
+                )
+            except Exception:
+                log.exception("settings.ops_menu_reopen_failed", job=job_name)
+
+        launch_background_job(job_name=job_name, coro=_job())
+
     def build_ops_menu_keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -1534,6 +1552,18 @@ def create_settings_router(context: SettingsContext) -> Router:
             f"Пропущено (rate limit): {stats.skipped_rate_limited}",
             f"Ошибки загрузки RSS: {stats.rss_fetch_errors}",
         ]
+        if stats.entries_total == 0:
+            lines.append("")
+            lines.append("Новых RSS entries не найдено.")
+            if stats.rss_fetch_errors > 0:
+                lines.append(
+                    "Часть источников недоступна (HTTP/SSL/блокировки). Проверьте /source_health."
+                )
+            else:
+                lines.append(
+                    "Проверьте, что у источников указан именно RSS URL, а не главная страница сайта."
+                )
+                lines.append("Команды: /list_sources, /source_health, /add_source <rss_url> [name]")
         return "\n".join(lines)
 
     def render_autoplan_preview(*, title: str, result) -> str:  # noqa: ANN001
@@ -3971,9 +4001,10 @@ def create_settings_router(context: SettingsContext) -> Router:
                     await commands_help(proxy_message)
                     return
                 if act == "ingest_now":
-                    launch_background_job(
+                    await run_background_with_menu(
                         job_name="ops_ingest_now",
-                        coro=ingest_now(proxy_message),
+                        proxy_message=proxy_message,
+                        action_coro=ingest_now(proxy_message),
                     )
                     await send_or_edit_ops_page(
                         query=query,
@@ -4078,9 +4109,10 @@ def create_settings_router(context: SettingsContext) -> Router:
                     await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
                     return
                 if src_action == "ing":
-                    launch_background_job(
+                    await run_background_with_menu(
                         job_name=f"ops_ingest_source_{source_id}",
-                        coro=ingest_source(proxy_message, SimpleNamespace(args=str(source_id))),
+                        proxy_message=proxy_message,
+                        action_coro=ingest_source(proxy_message, SimpleNamespace(args=str(source_id))),
                     )
                     text, keyboard = await render_ops_sources_page(page=page)
                     await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
@@ -4123,9 +4155,10 @@ def create_settings_router(context: SettingsContext) -> Router:
             if tokens[0] == "tr":
                 tr_action = tokens[1] if len(tokens) >= 2 else ""
                 if tr_action == "collect":
-                    launch_background_job(
+                    await run_background_with_menu(
                         job_name="ops_collect_trends",
-                        coro=collect_trends(proxy_message),
+                        proxy_message=proxy_message,
+                        action_coro=collect_trends(proxy_message),
                     )
                     await send_or_edit_ops_page(
                         query=query,
@@ -4134,9 +4167,10 @@ def create_settings_router(context: SettingsContext) -> Router:
                     )
                     return
                 if tr_action == "scan":
-                    launch_background_job(
+                    await run_background_with_menu(
                         job_name="ops_trend_scan",
-                        coro=trend_scan(proxy_message, SimpleNamespace(args="24 6")),
+                        proxy_message=proxy_message,
+                        action_coro=trend_scan(proxy_message, SimpleNamespace(args="24 6")),
                     )
                     await send_or_edit_ops_page(
                         query=query,
