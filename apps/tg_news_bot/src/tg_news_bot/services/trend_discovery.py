@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import html
 import re
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import feedparser
 import httpx
@@ -644,6 +644,9 @@ class TrendDiscoveryService:
             rows.extend(await self._collect_hn(http, since, limit))
             rows.extend(await self._collect_reddit(http, since, limit))
             rows.extend(await self._collect_x(http, since, limit))
+            rows.extend(await self._collect_github_trending(http, since, limit))
+            rows.extend(await self._collect_steam_charts(http, since, limit))
+            rows.extend(await self._collect_boxoffice(http, since, limit))
 
         dedup: dict[str, NetworkTrendItem] = {}
         for item in rows:
@@ -794,6 +797,198 @@ class TrendDiscoveryService:
                         items.append(built)
             except Exception:
                 self._log.exception("trend_discovery.x_fetch_failed", feed_url=feed_url)
+        return items
+
+    async def _collect_github_trending(
+        self,
+        http: httpx.AsyncClient,
+        since: datetime,
+        limit: int,
+    ) -> list[NetworkTrendItem]:
+        discovery = self._settings.trend_discovery
+        if not bool(getattr(discovery, "github_trending_enabled", True)):
+            return []
+        feed_url = str(getattr(discovery, "github_trending_url", "https://github.com/trending"))
+        items: list[NetworkTrendItem] = []
+        now = datetime.now(timezone.utc)
+        if now < since:
+            return items
+        try:
+            response = await http.get(
+                feed_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; tg-news-bot/1.0)",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            response.raise_for_status()
+            blocks = re.findall(
+                r'(?is)<article[^>]*class="Box-row"[^>]*>(.*?)</article>',
+                response.text,
+            )
+            seen_urls: set[str] = set()
+            for block in blocks[: max(1, limit)]:
+                link_match = re.search(r'href="(/[^"/\s]+/[^"/\s]+)"', block)
+                if not link_match:
+                    continue
+                path = link_match.group(1).strip()
+                url = f"https://github.com{path}"
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                repo_name = path.strip("/")
+                summary_match = re.search(r"(?is)<p[^>]*>(.*?)</p>", block)
+                summary = ""
+                if summary_match:
+                    summary = _strip_html(summary_match.group(1))
+                built = self._build_item(
+                    source_name="GITHUB",
+                    source_ref=feed_url,
+                    title=f"GitHub Trending: {repo_name}",
+                    url=url,
+                    summary=summary or repo_name,
+                    observed=now,
+                )
+                if built:
+                    items.append(built)
+        except Exception:
+            self._log.exception("trend_discovery.github_trending_fetch_failed", feed_url=feed_url)
+        return items
+
+    async def _collect_steam_charts(
+        self,
+        http: httpx.AsyncClient,
+        since: datetime,
+        limit: int,
+    ) -> list[NetworkTrendItem]:
+        discovery = self._settings.trend_discovery
+        if not bool(getattr(discovery, "steam_charts_enabled", True)):
+            return []
+        feed_url = str(getattr(discovery, "steam_charts_url", "https://steamcharts.com/top"))
+        items: list[NetworkTrendItem] = []
+        now = datetime.now(timezone.utc)
+        if now < since:
+            return items
+        try:
+            response = await http.get(
+                feed_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; tg-news-bot/1.0)",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            response.raise_for_status()
+            matches = re.findall(
+                r'(?is)<a[^>]+href="/app/(\d+)"[^>]*>(.*?)</a>',
+                response.text,
+            )
+            seen_app_ids: set[str] = set()
+            for app_id, raw_title in matches:
+                if len(items) >= max(1, limit):
+                    break
+                if app_id in seen_app_ids:
+                    continue
+                seen_app_ids.add(app_id)
+                title = _strip_html(raw_title)
+                if not title:
+                    continue
+                built = self._build_item(
+                    source_name="STEAM_CHARTS",
+                    source_ref=feed_url,
+                    title=f"Steam charts: {title}",
+                    url=f"https://store.steampowered.com/app/{app_id}/",
+                    summary=f"Steam charts signal, app_id={app_id}",
+                    observed=now,
+                )
+                if built:
+                    items.append(built)
+        except Exception:
+            self._log.exception("trend_discovery.steam_charts_fetch_failed", feed_url=feed_url)
+        return items
+
+    async def _collect_boxoffice(
+        self,
+        http: httpx.AsyncClient,
+        since: datetime,
+        limit: int,
+    ) -> list[NetworkTrendItem]:
+        discovery = self._settings.trend_discovery
+        if not bool(getattr(discovery, "boxoffice_enabled", True)):
+            return []
+
+        urls = list(getattr(discovery, "boxoffice_urls", []) or ["https://www.boxofficemojo.com/month/"])
+        items: list[NetworkTrendItem] = []
+        now = datetime.now(timezone.utc)
+        if now < since:
+            return items
+
+        month_urls: list[str] = []
+        try:
+            for seed_url in urls:
+                response = await http.get(
+                    seed_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; tg-news-bot/1.0)",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                response.raise_for_status()
+                if "/month/" in seed_url.rstrip("/") and re.search(r"/month/[a-z]+/\d{4}/?", seed_url):
+                    month_urls.append(seed_url)
+                    continue
+                # Monthly index page: pick latest month pages.
+                found = re.findall(
+                    r'href="(/month/[a-z]+/\d{4}/[^"]*)"',
+                    response.text,
+                )
+                for path in found:
+                    full_url = urljoin("https://www.boxofficemojo.com", path)
+                    if full_url not in month_urls:
+                        month_urls.append(full_url)
+                if not found:
+                    month_urls.append(seed_url)
+        except Exception:
+            self._log.exception("trend_discovery.boxoffice_fetch_seed_failed")
+            return items
+
+        per_page = max(3, limit // max(len(month_urls), 1))
+        seen_urls: set[str] = set()
+        for month_url in month_urls[:4]:
+            try:
+                response = await http.get(
+                    month_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; tg-news-bot/1.0)",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                response.raise_for_status()
+                matches = re.findall(
+                    r'(?is)<a[^>]+href="(/release/rl\d+/?[^"]*)"[^>]*>([^<]+)</a>',
+                    response.text,
+                )
+                for path, raw_title in matches[:per_page]:
+                    if len(items) >= max(1, limit):
+                        break
+                    url = urljoin("https://www.boxofficemojo.com", path)
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    title = _compact(raw_title)
+                    if not title:
+                        continue
+                    built = self._build_item(
+                        source_name="BOXOFFICE",
+                        source_ref=month_url,
+                        title=f"Box office trend: {title}",
+                        url=url,
+                        summary=f"BoxOfficeMojo monthly chart signal ({month_url})",
+                        observed=now,
+                    )
+                    if built:
+                        items.append(built)
+            except Exception:
+                self._log.exception("trend_discovery.boxoffice_fetch_failed", month_url=month_url)
         return items
 
     async def _build_topic_candidates(
@@ -1131,6 +1326,11 @@ def _normalize_keywords(value) -> list[str]:  # noqa: ANN001
         if text:
             result.append(text)
     return result
+
+
+def _strip_html(value: str) -> str:
+    text = re.sub(r"(?is)<[^>]+>", " ", value or "")
+    return _compact(html.unescape(text))
 
 
 def _compact(value: str) -> str:

@@ -5,20 +5,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import re
+from types import SimpleNamespace
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import feedparser
 from httpx import AsyncClient
-from aiogram import Router
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_news_bot.config import Settings
 from tg_news_bot.db.models import BotSettings, DraftState, ScheduledPostStatus
 from tg_news_bot.logging import get_logger
-from tg_news_bot.ports.publisher import PublisherPort
+from tg_news_bot.ports.publisher import (
+    PublisherEditNotAllowed,
+    PublisherNotFound,
+    PublisherNotModified,
+    PublisherPort,
+)
 from tg_news_bot.repositories.drafts import DraftRepository
 from tg_news_bot.repositories.scheduled_posts import ScheduledPostRepository
 from tg_news_bot.repositories.sources import SourceRepository
@@ -57,6 +64,7 @@ class SettingsContext:
     draft_repo: DraftRepository | None = None
     analytics: AnalyticsService | None = None
     autoplan: AutoPlanService | None = None
+    trend_profile_repository: TrendTopicProfileRepository | None = None
 
 
 def parse_source_args(raw_args: str) -> tuple[str, str]:
@@ -103,6 +111,16 @@ def create_settings_router(context: SettingsContext) -> Router:
             "syntax": "/commands",
             "description": "Показывает полный список команд с назначением и синтаксисом.",
             "where": "Любой топик рабочей группы.",
+        },
+        "setup_ui": {
+            "syntax": "/setup_ui",
+            "description": "Открывает мастер настройки группы/топиков кнопками (без ручного ввода /set_*).",
+            "where": "Внутри рабочей супергруппы, желательно из нужного topic.",
+        },
+        "menu": {
+            "syntax": "/menu",
+            "description": "Открывает операционный центр с кнопками для быстрых действий без ручного ввода команд.",
+            "where": "Обычно #General.",
         },
         "status": {
             "syntax": "/status",
@@ -405,8 +423,9 @@ def create_settings_router(context: SettingsContext) -> Router:
         },
     }
     command_sections = {
-        "Общие": {"commands", "status"},
+        "Общие": {"commands", "menu", "status"},
         "Настройка группы/топиков": {
+            "setup_ui",
             "set_group",
             "set_inbox_topic",
             "set_service_topic",
@@ -483,7 +502,7 @@ def create_settings_router(context: SettingsContext) -> Router:
         if context.workflow is not None
         else None
     )
-    trend_profiles_repo = TrendTopicProfileRepository()
+    trend_profiles_repo = context.trend_profile_repository or TrendTopicProfileRepository()
     trend_status_labels = {
         "PENDING": "ожидает",
         "APPROVED": "подтверждён",
@@ -491,6 +510,432 @@ def create_settings_router(context: SettingsContext) -> Router:
         "INGESTED": "добавлен во входящие",
         "FAILED": "ошибка",
     }
+    ops_callback_prefix = "ops:"
+
+    def ops_data(action: str) -> str:
+        return f"{ops_callback_prefix}{action}"
+
+    def build_ops_menu_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Система",
+                        callback_data=ops_data("page:system"),
+                    ),
+                    InlineKeyboardButton(
+                        text="Источники",
+                        callback_data=ops_data("page:sources:1"),
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Тренды",
+                        callback_data=ops_data("page:trends"),
+                    ),
+                    InlineKeyboardButton(
+                        text="Планировщик",
+                        callback_data=ops_data("page:scheduler"),
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Обновить меню",
+                        callback_data=ops_data("menu"),
+                    ),
+                ],
+            ]
+        )
+
+    def build_ops_system_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Статус", callback_data=ops_data("act:status")),
+                    InlineKeyboardButton(text="Команды", callback_data=ops_data("act:commands")),
+                ],
+                [
+                    InlineKeyboardButton(text="Ingest сейчас", callback_data=ops_data("act:ingest_now")),
+                    InlineKeyboardButton(text="Аналитика 24ч", callback_data=ops_data("act:analytics24")),
+                ],
+                [
+                    InlineKeyboardButton(text="Setup Wizard", callback_data=ops_data("page:setup")),
+                ],
+                [
+                    InlineKeyboardButton(text="Назад", callback_data=ops_data("menu")),
+                ],
+            ]
+        )
+
+    def build_ops_scheduler_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Карта публикаций",
+                        callback_data=ops_data("act:schedule_map"),
+                    ),
+                    InlineKeyboardButton(
+                        text="Autoplan preview",
+                        callback_data=ops_data("act:autoplan_preview"),
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Autoplan apply",
+                        callback_data=ops_data("act:autoplan_apply"),
+                    ),
+                    InlineKeyboardButton(
+                        text="Autoplan rules",
+                        callback_data=ops_data("act:autoplan_rules"),
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(text="Назад", callback_data=ops_data("menu")),
+                ],
+            ]
+        )
+
+    def build_ops_trends_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Collect trends", callback_data=ops_data("tr:collect")),
+                    InlineKeyboardButton(text="Trend scan", callback_data=ops_data("tr:scan")),
+                ],
+                [
+                    InlineKeyboardButton(text="Signals", callback_data=ops_data("tr:signals")),
+                    InlineKeyboardButton(text="Topics", callback_data=ops_data("tr:topics")),
+                ],
+                [
+                    InlineKeyboardButton(text="Профили тем", callback_data=ops_data("page:trend_profiles:1")),
+                ],
+                [
+                    InlineKeyboardButton(text="Назад", callback_data=ops_data("menu")),
+                ],
+            ]
+        )
+
+    async def render_ops_sources_page(
+        *,
+        page: int,
+        page_size: int = 6,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        requested_page = max(page, 1)
+        async with context.session_factory() as session:
+            async with session.begin():
+                sources = await context.source_repository.list_all(session)
+
+        total = len(sources)
+        total_pages = max((total + page_size - 1) // page_size, 1)
+        current_page = min(requested_page, total_pages)
+        offset = (current_page - 1) * page_size
+        rows = sources[offset : offset + page_size]
+
+        lines = [
+            f"Источники RSS: {total}",
+            f"Страница: {current_page}/{total_pages}",
+            "Кнопки у источника: ON/OFF и разовый ingestion.",
+        ]
+        keyboard_rows: list[list[InlineKeyboardButton]] = []
+        if not rows:
+            lines.append("Источники не настроены.")
+        for source in rows:
+            state = "ON" if source.enabled else "OFF"
+            trust = float(source.trust_score or 0.0)
+            lines.append(f"#{source.id} [{state}] trust={trust:.2f} {source.name}")
+            lines.append(source.url)
+            keyboard_rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{state} #{source.id}",
+                        callback_data=ops_data(f"src:tgl:{source.id}:{current_page}"),
+                    ),
+                    InlineKeyboardButton(
+                        text=f"Ingest #{source.id}",
+                        callback_data=ops_data(f"src:ing:{source.id}:{current_page}"),
+                    ),
+                ]
+            )
+
+        nav_row: list[InlineKeyboardButton] = []
+        if current_page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="←",
+                    callback_data=ops_data(f"page:sources:{current_page - 1}"),
+                )
+            )
+        if current_page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="→",
+                    callback_data=ops_data(f"page:sources:{current_page + 1}"),
+                )
+            )
+        if nav_row:
+            keyboard_rows.append(nav_row)
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(text="Назад", callback_data=ops_data("menu")),
+            ]
+        )
+
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    def build_setup_ui_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Сохранить группу", callback_data=ops_data("cfg:group")),
+                ],
+                [
+                    InlineKeyboardButton(text="INBOX", callback_data=ops_data("cfg:inbox")),
+                    InlineKeyboardButton(text="EDITING", callback_data=ops_data("cfg:editing")),
+                    InlineKeyboardButton(text="READY", callback_data=ops_data("cfg:ready")),
+                ],
+                [
+                    InlineKeyboardButton(text="SCHEDULED", callback_data=ops_data("cfg:scheduled")),
+                    InlineKeyboardButton(text="PUBLISHED", callback_data=ops_data("cfg:published")),
+                    InlineKeyboardButton(text="ARCHIVE", callback_data=ops_data("cfg:archive")),
+                ],
+                [
+                    InlineKeyboardButton(text="TREND", callback_data=ops_data("cfg:trend")),
+                    InlineKeyboardButton(text="Показать статус", callback_data=ops_data("act:status")),
+                ],
+                [
+                    InlineKeyboardButton(text="Назад", callback_data=ops_data("page:system")),
+                ],
+            ]
+        )
+
+    async def render_setup_ui_text(
+        *,
+        chat_id: int,
+        topic_id: int | None,
+        info: str | None = None,
+    ) -> str:
+        async with context.session_factory() as session:
+            async with session.begin():
+                bot_settings = await context.repository.get_or_create(session)
+
+        def mark(value: int | None) -> str:
+            if value is None:
+                return "-"
+            if topic_id is not None and value == topic_id:
+                return f"{value} <= current topic"
+            return str(value)
+
+        lines = [
+            "Setup wizard группы и топиков",
+            f"Текущая группа: {chat_id}",
+            f"Текущий topic: {topic_id if topic_id is not None else 'нет'}",
+            "",
+            f"group_chat_id: {bot_settings.group_chat_id}",
+            f"inbox_topic_id: {mark(bot_settings.inbox_topic_id)}",
+            f"editing_topic_id: {mark(bot_settings.editing_topic_id)}",
+            f"ready_topic_id: {mark(bot_settings.ready_topic_id)}",
+            f"scheduled_topic_id: {mark(bot_settings.scheduled_topic_id)}",
+            f"published_topic_id: {mark(bot_settings.published_topic_id)}",
+            f"archive_topic_id: {mark(bot_settings.archive_topic_id)}",
+            f"trend_candidates_topic_id: {mark(bot_settings.trend_candidates_topic_id)}",
+            "",
+            "Кнопки применяют настройку к текущей группе/топику.",
+        ]
+        if info:
+            lines.append(f"Последнее действие: {info}")
+        return "\n".join(lines)
+
+    async def render_ops_trend_topics(
+        *,
+        hours: int = 24,
+        limit: int = 8,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        lines = [f"Трендовые темы за {hours}ч:"]
+        keyboard_rows: list[list[InlineKeyboardButton]] = []
+        if context.trend_discovery is None:
+            lines.append("Модуль trend discovery недоступен.")
+        else:
+            rows = await context.trend_discovery.list_topics(hours=hours, limit=limit)
+            if not rows:
+                lines.append("Темы не найдены.")
+            else:
+                for row in rows:
+                    lines.append(
+                        f"#{row.id} score={float(row.trend_score):.2f} "
+                        f"conf={float(row.confidence):.2f} {row.topic_name}"
+                    )
+                    keyboard_rows.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"Открыть тему #{row.id}",
+                                callback_data=ops_data(f"tr:open:{row.id}"),
+                            )
+                        ]
+                    )
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(text="Обновить", callback_data=ops_data("tr:topics")),
+                InlineKeyboardButton(text="Назад", callback_data=ops_data("page:trends")),
+            ]
+        )
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    async def render_ops_trend_topic_detail(topic_id: int) -> tuple[str, InlineKeyboardMarkup]:
+        lines = [f"Тема #{topic_id}:"]
+        keyboard_rows: list[list[InlineKeyboardButton]] = []
+        if context.trend_discovery is None:
+            lines.append("Модуль trend discovery недоступен.")
+        else:
+            articles = await context.trend_discovery.list_articles(topic_id=topic_id, limit=5)
+            sources = await context.trend_discovery.list_sources(topic_id=topic_id, limit=5)
+
+            lines.append(f"Кандидаты статей: {len(articles)}")
+            for row in articles:
+                status_obj = getattr(row, "status", None)
+                status_value = getattr(status_obj, "value", status_obj)
+                status = str(status_value).upper()
+                lines.append(
+                    f"A#{row.id} [{status.lower()}] score={float(row.score):.2f} "
+                    f"{_trim_text(row.title or row.url, 80)}"
+                )
+                if status not in {"INGESTED", "REJECTED"}:
+                    keyboard_rows.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"Во входящие A#{row.id}",
+                                callback_data=ops_data(f"tr:ing:{row.id}:{topic_id}"),
+                            )
+                        ]
+                    )
+
+            lines.append("")
+            lines.append(f"Кандидаты источников: {len(sources)}")
+            for row in sources:
+                status_obj = getattr(row, "status", None)
+                status_value = getattr(status_obj, "value", status_obj)
+                status = str(status_value).upper()
+                lines.append(
+                    f"S#{row.id} [{status.lower()}] score={float(row.score):.2f} {row.domain}"
+                )
+                if status not in {"APPROVED", "REJECTED"}:
+                    keyboard_rows.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"Добавить источник S#{row.id}",
+                                callback_data=ops_data(f"tr:add:{row.id}:{topic_id}"),
+                            )
+                        ]
+                    )
+
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Обновить тему",
+                    callback_data=ops_data(f"tr:open:{topic_id}"),
+                ),
+                InlineKeyboardButton(text="К темам", callback_data=ops_data("tr:topics")),
+            ]
+        )
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(text="Назад", callback_data=ops_data("page:trends")),
+            ]
+        )
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    async def render_ops_trend_profiles_page(
+        *,
+        page: int,
+        page_size: int = 6,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        requested_page = max(page, 1)
+        async with context.session_factory() as session:
+            async with session.begin():
+                profiles = await trend_profiles_repo.list_all(session)
+
+        total = len(profiles)
+        total_pages = max((total + page_size - 1) // page_size, 1)
+        current_page = min(requested_page, total_pages)
+        offset = (current_page - 1) * page_size
+        rows = profiles[offset : offset + page_size]
+
+        lines = [
+            f"Профили трендов: {total}",
+            f"Страница: {current_page}/{total_pages}",
+            "Кнопка у профиля переключает его участие в /trend_scan.",
+        ]
+        keyboard_rows: list[list[InlineKeyboardButton]] = []
+        if not rows:
+            lines.append("Профили не настроены.")
+        for profile in rows:
+            state = "ON" if profile.enabled else "OFF"
+            lines.append(
+                f"#{profile.id} [{state}] {profile.name} "
+                f"seed={len(profile.seed_keywords or [])} "
+                f"min_score={float(profile.min_article_score):.2f}"
+            )
+            keyboard_rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{state} #{profile.id}",
+                        callback_data=ops_data(f"prf:tgl:{profile.id}:{current_page}"),
+                    )
+                ]
+            )
+
+        nav_row: list[InlineKeyboardButton] = []
+        if current_page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="←",
+                    callback_data=ops_data(f"page:trend_profiles:{current_page - 1}"),
+                )
+            )
+        if current_page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="→",
+                    callback_data=ops_data(f"page:trend_profiles:{current_page + 1}"),
+                )
+            )
+        if nav_row:
+            keyboard_rows.append(nav_row)
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(text="Назад", callback_data=ops_data("page:trends")),
+            ]
+        )
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    async def send_or_edit_ops_page(
+        *,
+        query: CallbackQuery,
+        text: str,
+        keyboard: InlineKeyboardMarkup,
+    ) -> None:
+        if query.message is not None:
+            try:
+                await context.publisher.edit_text(
+                    chat_id=query.message.chat.id,
+                    message_id=query.message.message_id,
+                    text=text,
+                    keyboard=keyboard,
+                    disable_web_page_preview=True,
+                )
+                return
+            except (PublisherNotFound, PublisherEditNotAllowed, PublisherNotModified):
+                pass
+            except Exception:
+                log.exception("settings.ops_menu_edit_failed")
+
+        if query.message is not None:
+            await context.publisher.send_text(
+                chat_id=query.message.chat.id,
+                topic_id=query.message.message_thread_id,
+                text=text,
+                keyboard=keyboard,
+            )
 
     def is_admin(message: Message) -> bool:
         return bool(message.from_user and message.from_user.id == context.settings.admin_user_id)
@@ -614,6 +1059,12 @@ def create_settings_router(context: SettingsContext) -> Router:
         if mode not in {"ru", "en", "both"}:
             return None
         return mode
+
+    def _trim_text(value: str, limit: int) -> str:
+        compact = re.sub(r"\s+", " ", (value or "").strip())
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[: max(limit - 1, 1)].rstrip()}..."
 
     def parse_draft_hashtags_args(raw: str | None) -> tuple[int, list[str]] | None:
         if raw is None:
@@ -1343,6 +1794,36 @@ def create_settings_router(context: SettingsContext) -> Router:
                 topic_id=message.message_thread_id,
                 text=page,
             )
+
+    @router.message(Command("menu"))
+    async def menu(message: Message) -> None:
+        if not is_admin(message):
+            return
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=(
+                "Операционный центр.\n"
+                "Разделы: Система, Источники, Тренды, Планировщик.\n"
+                "Кнопки выполняют типовые сценарии, команды оставлены для тонкой настройки."
+            ),
+            keyboard=build_ops_menu_keyboard(),
+        )
+
+    @router.message(Command("setup_ui"))
+    async def setup_ui(message: Message) -> None:
+        if not is_admin(message):
+            return
+        text = await render_setup_ui_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+        )
+        await context.publisher.send_text(
+            chat_id=message.chat.id,
+            topic_id=message.message_thread_id,
+            text=text,
+            keyboard=build_setup_ui_keyboard(),
+        )
 
     @router.message(Command("add_source"))
     async def add_source(message: Message, command: CommandObject) -> None:
@@ -3069,5 +3550,342 @@ def create_settings_router(context: SettingsContext) -> Router:
             topic_id=message.message_thread_id,
             text=analytics_service.render(snapshot),
         )
+
+    async def safe_callback_answer(
+        query: CallbackQuery,
+        *,
+        text: str | None = None,
+    ) -> None:
+        try:
+            await query.answer(text=text)
+        except TelegramBadRequest:
+            return
+
+    def query_to_message(query: CallbackQuery) -> Message | SimpleNamespace | None:
+        if query.message is None:
+            return None
+        return SimpleNamespace(
+            from_user=query.from_user,
+            chat=query.message.chat,
+            message_thread_id=query.message.message_thread_id,
+        )
+
+    @router.callback_query(F.data.startswith(ops_callback_prefix))
+    async def ops_menu_action(query: CallbackQuery) -> None:
+        if not query.from_user or query.from_user.id != context.settings.admin_user_id:
+            await safe_callback_answer(query)
+            return
+        action = (query.data or "").removeprefix(ops_callback_prefix).strip().lower()
+        proxy_message = query_to_message(query)
+        if proxy_message is None:
+            await safe_callback_answer(query, text="Откройте меню в топике группы")
+            return
+
+        await safe_callback_answer(query)
+        legacy_map = {
+            "status": "act:status",
+            "commands": "act:commands",
+            "ingest_now": "act:ingest_now",
+            "list_sources": "page:sources:1",
+            "trend_scan": "tr:scan",
+            "trend_topics": "tr:topics",
+            "trends": "tr:signals",
+            "schedule_map": "act:schedule_map",
+            "autoplan_preview": "act:autoplan_preview",
+            "autoplan_apply": "act:autoplan_apply",
+            "autoplan_rules": "act:autoplan_rules",
+        }
+        action = legacy_map.get(action, action)
+        tokens = [token for token in action.split(":") if token]
+
+        try:
+            if action == "menu":
+                await send_or_edit_ops_page(
+                    query=query,
+                    text=(
+                        "Операционный центр.\n"
+                        "Разделы: Система, Источники, Тренды, Планировщик.\n"
+                        "Кнопки выполняют типовые сценарии, команды оставлены для тонкой настройки."
+                    ),
+                    keyboard=build_ops_menu_keyboard(),
+                )
+                return
+
+            if not tokens:
+                await safe_callback_answer(query, text="Действие не поддерживается")
+                return
+
+            if tokens[0] == "page":
+                page_name = tokens[1] if len(tokens) >= 2 else ""
+                if page_name == "system":
+                    await send_or_edit_ops_page(
+                        query=query,
+                        text="Раздел: Система",
+                        keyboard=build_ops_system_keyboard(),
+                    )
+                    return
+                if page_name == "setup":
+                    text = await render_setup_ui_text(
+                        chat_id=proxy_message.chat.id,
+                        topic_id=proxy_message.message_thread_id,
+                    )
+                    await send_or_edit_ops_page(
+                        query=query,
+                        text=text,
+                        keyboard=build_setup_ui_keyboard(),
+                    )
+                    return
+                if page_name == "sources":
+                    page = parse_positive_int(tokens[2] if len(tokens) >= 3 else "1") or 1
+                    text, keyboard = await render_ops_sources_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if page_name == "trends":
+                    await send_or_edit_ops_page(
+                        query=query,
+                        text="Раздел: Тренды",
+                        keyboard=build_ops_trends_keyboard(),
+                    )
+                    return
+                if page_name == "trend_profiles":
+                    page = parse_positive_int(tokens[2] if len(tokens) >= 3 else "1") or 1
+                    text, keyboard = await render_ops_trend_profiles_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if page_name == "scheduler":
+                    await send_or_edit_ops_page(
+                        query=query,
+                        text="Раздел: Планировщик публикаций",
+                        keyboard=build_ops_scheduler_keyboard(),
+                    )
+                    return
+
+            if tokens[0] == "act":
+                act = tokens[1] if len(tokens) >= 2 else ""
+                if act == "status":
+                    await status(proxy_message)
+                    return
+                if act == "commands":
+                    await commands_help(proxy_message)
+                    return
+                if act == "ingest_now":
+                    await ingest_now(proxy_message)
+                    return
+                if act == "analytics24":
+                    await analytics(proxy_message, SimpleNamespace(args="24"))
+                    return
+                if act == "schedule_map":
+                    await schedule_map(proxy_message, SimpleNamespace(args="48 30"))
+                    return
+                if act == "autoplan_preview":
+                    await autoplan_preview(proxy_message, SimpleNamespace(args="24 10"))
+                    return
+                if act == "autoplan_apply":
+                    await autoplan_apply(proxy_message, SimpleNamespace(args="24 10"))
+                    return
+                if act == "autoplan_rules":
+                    await autoplan_rules(proxy_message)
+                    return
+
+            if tokens[0] == "cfg":
+                action_name = tokens[1] if len(tokens) >= 2 else ""
+                info = ""
+                topic_id = proxy_message.message_thread_id
+
+                if action_name == "group":
+                    def updater(bs: BotSettings) -> None:
+                        bs.group_chat_id = proxy_message.chat.id
+
+                    await update_settings(updater)
+                    info = f"group_chat_id={proxy_message.chat.id}"
+                else:
+                    if topic_id is None:
+                        await safe_callback_answer(query, text="Действие доступно только в topic")
+                        return
+                    field_map = {
+                        "inbox": "inbox_topic_id",
+                        "editing": "editing_topic_id",
+                        "ready": "ready_topic_id",
+                        "scheduled": "scheduled_topic_id",
+                        "published": "published_topic_id",
+                        "archive": "archive_topic_id",
+                        "trend": "trend_candidates_topic_id",
+                    }
+                    target_field = field_map.get(action_name)
+                    if target_field is None:
+                        await safe_callback_answer(query, text="Неизвестное действие setup")
+                        return
+
+                    def updater(bs: BotSettings) -> None:
+                        bs.group_chat_id = proxy_message.chat.id
+                        setattr(bs, target_field, topic_id)
+
+                    await update_settings(updater)
+                    info = f"{target_field}={topic_id}"
+
+                text = await render_setup_ui_text(
+                    chat_id=proxy_message.chat.id,
+                    topic_id=proxy_message.message_thread_id,
+                    info=info,
+                )
+                await send_or_edit_ops_page(
+                    query=query,
+                    text=text,
+                    keyboard=build_setup_ui_keyboard(),
+                )
+                return
+
+            if tokens[0] == "src":
+                src_action = tokens[1] if len(tokens) >= 2 else ""
+                source_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                page = parse_positive_int(tokens[3] if len(tokens) >= 4 else "1") or 1
+                if source_id is None:
+                    await safe_callback_answer(query, text="Некорректный source_id")
+                    return
+                if src_action == "tgl":
+                    async with context.session_factory() as session:
+                        async with session.begin():
+                            source = await context.source_repository.get_by_id(session, source_id)
+                            if source is None:
+                                await context.publisher.send_text(
+                                    chat_id=proxy_message.chat.id,
+                                    topic_id=proxy_message.message_thread_id,
+                                    text=f"Источник #{source_id} не найден.",
+                                )
+                            else:
+                                source.enabled = not bool(source.enabled)
+                                await session.flush()
+                                state = "ON" if source.enabled else "OFF"
+                                await context.publisher.send_text(
+                                    chat_id=proxy_message.chat.id,
+                                    topic_id=proxy_message.message_thread_id,
+                                    text=f"Источник #{source_id} переключен: {state}",
+                                )
+                    text, keyboard = await render_ops_sources_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if src_action == "ing":
+                    await ingest_source(proxy_message, SimpleNamespace(args=str(source_id)))
+                    text, keyboard = await render_ops_sources_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+
+            if tokens[0] == "prf":
+                prf_action = tokens[1] if len(tokens) >= 2 else ""
+                profile_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                page = parse_positive_int(tokens[3] if len(tokens) >= 4 else "1") or 1
+                if profile_id is None:
+                    await safe_callback_answer(query, text="Некорректный profile_id")
+                    return
+                if prf_action == "tgl":
+                    async with context.session_factory() as session:
+                        async with session.begin():
+                            profile = await trend_profiles_repo.get_by_id(session, profile_id)
+                            if profile is None:
+                                await context.publisher.send_text(
+                                    chat_id=proxy_message.chat.id,
+                                    topic_id=proxy_message.message_thread_id,
+                                    text=f"Профиль #{profile_id} не найден.",
+                                )
+                                return
+                            profile = await trend_profiles_repo.set_enabled(
+                                session,
+                                profile_id=profile_id,
+                                enabled=not bool(profile.enabled),
+                            )
+
+                    state = "ON" if profile and profile.enabled else "OFF"
+                    await context.publisher.send_text(
+                        chat_id=proxy_message.chat.id,
+                        topic_id=proxy_message.message_thread_id,
+                        text=f"Профиль #{profile_id} переключен: {state}",
+                    )
+                    text, keyboard = await render_ops_trend_profiles_page(page=page)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+
+            if tokens[0] == "tr":
+                tr_action = tokens[1] if len(tokens) >= 2 else ""
+                if tr_action == "collect":
+                    await collect_trends(proxy_message)
+                    return
+                if tr_action == "scan":
+                    await trend_scan(proxy_message, SimpleNamespace(args="24 6"))
+                    return
+                if tr_action == "signals":
+                    await trends(proxy_message, SimpleNamespace(args="24 20"))
+                    return
+                if tr_action == "topics":
+                    text, keyboard = await render_ops_trend_topics(hours=24, limit=8)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if tr_action == "open":
+                    topic_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                    if topic_id is None:
+                        await safe_callback_answer(query, text="Некорректный topic_id")
+                        return
+                    text, keyboard = await render_ops_trend_topic_detail(topic_id)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if tr_action == "ing":
+                    candidate_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                    topic_id = parse_positive_int(tokens[3] if len(tokens) >= 4 else None)
+                    if candidate_id is None or topic_id is None:
+                        await safe_callback_answer(query, text="Некорректный candidate_id/topic_id")
+                        return
+                    if context.trend_discovery is None:
+                        await context.publisher.send_text(
+                            chat_id=proxy_message.chat.id,
+                            topic_id=proxy_message.message_thread_id,
+                            text="Модуль trend discovery недоступен.",
+                        )
+                        return
+                    result = await context.trend_discovery.ingest_article_candidate(
+                        candidate_id=candidate_id,
+                        user_id=proxy_message.from_user.id if proxy_message.from_user else 0,
+                    )
+                    await context.publisher.send_text(
+                        chat_id=proxy_message.chat.id,
+                        topic_id=proxy_message.message_thread_id,
+                        text=result.message,
+                    )
+                    text, keyboard = await render_ops_trend_topic_detail(topic_id)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+                if tr_action == "add":
+                    candidate_id = parse_positive_int(tokens[2] if len(tokens) >= 3 else None)
+                    topic_id = parse_positive_int(tokens[3] if len(tokens) >= 4 else None)
+                    if candidate_id is None or topic_id is None:
+                        await safe_callback_answer(query, text="Некорректный candidate_id/topic_id")
+                        return
+                    if context.trend_discovery is None:
+                        await context.publisher.send_text(
+                            chat_id=proxy_message.chat.id,
+                            topic_id=proxy_message.message_thread_id,
+                            text="Модуль trend discovery недоступен.",
+                        )
+                        return
+                    result = await context.trend_discovery.add_source_candidate(
+                        candidate_id=candidate_id,
+                        user_id=proxy_message.from_user.id if proxy_message.from_user else 0,
+                    )
+                    await context.publisher.send_text(
+                        chat_id=proxy_message.chat.id,
+                        topic_id=proxy_message.message_thread_id,
+                        text=result.message,
+                    )
+                    text, keyboard = await render_ops_trend_topic_detail(topic_id)
+                    await send_or_edit_ops_page(query=query, text=text, keyboard=keyboard)
+                    return
+        except Exception:
+            log.exception("settings.ops_menu_action_failed", action=action)
+            await context.publisher.send_text(
+                chat_id=proxy_message.chat.id,
+                topic_id=proxy_message.message_thread_id,
+                text="Ошибка операции из операционного центра. Смотри логи.",
+            )
+            return
+
+        await safe_callback_answer(query, text="Действие не поддерживается")
 
     return router

@@ -12,6 +12,7 @@ from tg_news_bot.telegram.handlers.settings import SettingsContext, create_setti
 @dataclass
 class _PublisherSpy:
     sent: list[dict] = field(default_factory=list)
+    edits: list[dict] = field(default_factory=list)
 
     async def send_text(
         self,
@@ -27,6 +28,28 @@ class _PublisherSpy:
                 "chat_id": chat_id,
                 "topic_id": topic_id,
                 "text": text,
+                "keyboard": keyboard,
+            }
+        )
+
+    async def edit_text(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        keyboard=None,  # noqa: ANN001
+        parse_mode=None,  # noqa: ANN001
+        disable_web_page_preview: bool = False,
+    ) -> None:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "keyboard": keyboard,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": disable_web_page_preview,
             }
         )
 
@@ -35,6 +58,7 @@ class _PublisherSpy:
 class _IngestionRunnerSpy:
     result: object | None = None
     calls: list[dict] = field(default_factory=list)
+    run_once_calls: list[set[int] | None] = field(default_factory=list)
 
     async def ingest_url(self, *, url: str, source_id=None, topic_hints=None):  # noqa: ANN001
         self.calls.append(
@@ -45,6 +69,22 @@ class _IngestionRunnerSpy:
             }
         )
         return self.result
+
+    async def run_once(self, *, source_ids=None):  # noqa: ANN001
+        self.run_once_calls.append(source_ids)
+        return SimpleNamespace(
+            sources_total=1,
+            entries_total=1,
+            created=1,
+            duplicates=0,
+            skipped_low_score=0,
+            skipped_invalid_entry=0,
+            skipped_no_html=0,
+            skipped_unsafe=0,
+            skipped_blocked=0,
+            skipped_rate_limited=0,
+            rss_fetch_errors=0,
+        )
 
 
 @dataclass
@@ -140,6 +180,34 @@ class _Message:
         return self.topic_id
 
 
+@dataclass
+class _CallbackQuery:
+    data: str
+    user_id: int = 10
+    chat_id: int = -1001
+    topic_id: int | None = 7
+    message_id: int = 4001
+    has_message: bool = True
+    answers: list[str | None] = field(default_factory=list)
+
+    @property
+    def from_user(self):
+        return SimpleNamespace(id=self.user_id)
+
+    @property
+    def message(self):
+        if not self.has_message:
+            return None
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=self.chat_id),
+            message_thread_id=self.topic_id,
+            message_id=self.message_id,
+        )
+
+    async def answer(self, text: str | None = None) -> None:
+        self.answers.append(text)
+
+
 class _DummySession:
     async def __aenter__(self):
         return self
@@ -171,6 +239,61 @@ class _SourceRepositorySpy:
 
 
 @dataclass
+class _TrendProfileRow:
+    id: int
+    name: str
+    enabled: bool
+    seed_keywords: list[str]
+    min_article_score: float
+
+
+@dataclass
+class _TrendProfileRepositorySpy:
+    rows: list[_TrendProfileRow] = field(default_factory=list)
+
+    async def list_all(self, session):  # noqa: ANN001
+        return list(self.rows)
+
+    async def get_by_id(self, session, profile_id: int):  # noqa: ANN001
+        for row in self.rows:
+            if row.id == profile_id:
+                return row
+        return None
+
+    async def set_enabled(self, session, *, profile_id: int, enabled: bool):  # noqa: ANN001
+        row = await self.get_by_id(session, profile_id)
+        if row is None:
+            return None
+        row.enabled = bool(enabled)
+        return row
+
+
+@dataclass
+class _BotSettingsRow:
+    group_chat_id: int | None = None
+    inbox_topic_id: int | None = None
+    editing_topic_id: int | None = None
+    ready_topic_id: int | None = None
+    scheduled_topic_id: int | None = None
+    published_topic_id: int | None = None
+    archive_topic_id: int | None = None
+    trend_candidates_topic_id: int | None = None
+    channel_id: int | None = None
+    autoplan_rules: dict | None = None
+
+
+@dataclass
+class _BotSettingsRepositorySpy:
+    row: _BotSettingsRow = field(default_factory=_BotSettingsRow)
+
+    async def get_or_create(self, session):  # noqa: ANN001
+        return self.row
+
+    async def get(self, session):  # noqa: ANN001
+        return self.row
+
+
+@dataclass
 class _ScheduledRepoSpy:
     rows: list[object] = field(default_factory=list)
     calls: list[dict] = field(default_factory=list)
@@ -198,6 +321,8 @@ def _router_and_handler_by_name(
     scheduled_repo=None,  # noqa: ANN001
     draft_repo=None,  # noqa: ANN001
     session_factory=None,  # noqa: ANN001
+    repository=None,  # noqa: ANN001
+    trend_profile_repository=None,  # noqa: ANN001
 ):
     context = SettingsContext(
         settings=SimpleNamespace(
@@ -209,7 +334,7 @@ def _router_and_handler_by_name(
             internet_scoring=SimpleNamespace(enabled=True),
         ),
         session_factory=session_factory or SimpleNamespace(),
-        repository=SimpleNamespace(),
+        repository=repository or _BotSettingsRepositorySpy(),
         source_repository=SimpleNamespace(),
         publisher=publisher,
         ingestion_runner=ingestion,
@@ -218,12 +343,48 @@ def _router_and_handler_by_name(
         autoplan=autoplan,
         scheduled_repo=scheduled_repo,
         draft_repo=draft_repo,
+        trend_profile_repository=trend_profile_repository,
     )
     router = create_settings_router(context)
     for handler in router.message.handlers:
         if handler.callback.__name__ == name:
             return router, handler.callback
     raise AssertionError(f"handler not found: {name}")
+
+
+def _router_and_callback_handler(
+    *,
+    publisher: _PublisherSpy,
+    ingestion: _IngestionRunnerSpy,
+    trend_discovery: _TrendDiscoverySpy | None = None,
+    source_repository=None,  # noqa: ANN001
+    session_factory=None,  # noqa: ANN001
+    repository=None,  # noqa: ANN001
+    trend_profile_repository=None,  # noqa: ANN001
+):
+    context = SettingsContext(
+        settings=SimpleNamespace(
+            admin_user_id=10,
+            trend_discovery=SimpleNamespace(default_window_hours=24, mode="suggest"),
+            analytics=SimpleNamespace(default_window_hours=24, max_window_hours=240),
+            post_formatting=SimpleNamespace(hashtag_mode="both"),
+            scheduler=SimpleNamespace(timezone="UTC"),
+            internet_scoring=SimpleNamespace(enabled=True),
+        ),
+        session_factory=session_factory or _dummy_session_factory,
+        repository=repository or _BotSettingsRepositorySpy(),
+        source_repository=source_repository or _SourceRepositorySpy(),
+        publisher=publisher,
+        ingestion_runner=ingestion,
+        workflow=SimpleNamespace(),
+        trend_discovery=trend_discovery,
+        trend_profile_repository=trend_profile_repository,
+    )
+    router = create_settings_router(context)
+    for handler in router.callback_query.handlers:
+        if handler.callback.__name__ == "ops_menu_action":
+            return router, handler.callback
+    raise AssertionError("callback handler not found: ops_menu_action")
 
 
 @pytest.mark.asyncio
@@ -241,6 +402,8 @@ async def test_commands_help_contains_syntax_lines() -> None:
     assert publisher.sent
     text = "\n".join(item["text"] for item in publisher.sent)
     assert "/commands" in text
+    assert "/setup_ui" in text
+    assert "/menu" in text
     assert "/ingest_url <article_url> [source_id]" in text
     assert "/process_range <from_id> <to_id>" in text
     assert "/scheduled_failed_list [limit]" in text
@@ -274,6 +437,201 @@ async def test_commands_help_pages_are_within_safe_telegram_size() -> None:
     assert publisher.sent
     for item in publisher.sent:
         assert len(item["text"]) <= 3900
+
+
+@pytest.mark.asyncio
+async def test_menu_sends_operational_center_with_keyboard() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    _, handler = _router_and_handler_by_name(
+        "menu",
+        publisher=publisher,
+        ingestion=ingestion,
+    )
+
+    await handler(_Message())
+
+    assert len(publisher.sent) == 1
+    assert "Операционный центр" in publisher.sent[0]["text"]
+    assert publisher.sent[0]["keyboard"] is not None
+
+
+@pytest.mark.asyncio
+async def test_setup_ui_sends_wizard_with_keyboard() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    repo = _BotSettingsRepositorySpy(
+        row=_BotSettingsRow(
+            group_chat_id=-1001,
+            inbox_topic_id=10,
+            editing_topic_id=11,
+            ready_topic_id=12,
+        )
+    )
+    _, handler = _router_and_handler_by_name(
+        "setup_ui",
+        publisher=publisher,
+        ingestion=ingestion,
+        repository=repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    await handler(_Message(chat_id=-1001, topic_id=12))
+
+    assert publisher.sent
+    assert "Setup wizard" in publisher.sent[-1]["text"]
+    assert "ready_topic_id: 12 <= current topic" in publisher.sent[-1]["text"]
+    assert publisher.sent[-1]["keyboard"] is not None
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_callback_opens_system_page() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+    )
+
+    query = _CallbackQuery(data="ops:page:system")
+    await handler(query)
+
+    assert publisher.edits
+    assert "Раздел: Система" in publisher.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_trend_profiles_page_renders_profiles() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    profile_repo = _TrendProfileRepositorySpy(
+        rows=[
+            _TrendProfileRow(id=1, name="AI", enabled=True, seed_keywords=["ai", "llm"], min_article_score=1.2),
+            _TrendProfileRow(id=2, name="Space", enabled=False, seed_keywords=["space"], min_article_score=1.0),
+        ]
+    )
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+        trend_profile_repository=profile_repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    query = _CallbackQuery(data="ops:page:trend_profiles:1")
+    await handler(query)
+
+    assert publisher.edits
+    text = publisher.edits[-1]["text"]
+    assert "Профили трендов: 2" in text
+    assert "#1 [ON] AI" in text
+    assert "#2 [OFF] Space" in text
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_trend_profile_toggle_updates_state() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    profile_repo = _TrendProfileRepositorySpy(
+        rows=[
+            _TrendProfileRow(id=7, name="Gadgets", enabled=False, seed_keywords=["gadget"], min_article_score=1.1),
+        ]
+    )
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+        trend_profile_repository=profile_repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    query = _CallbackQuery(data="ops:prf:tgl:7:1")
+    await handler(query)
+
+    assert profile_repo.rows[0].enabled is True
+    assert publisher.sent
+    assert "Профиль #7 переключен: ON" in publisher.sent[-1]["text"]
+    assert publisher.edits
+    assert "#7 [ON] Gadgets" in publisher.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ops_setup_cfg_ready_updates_settings() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    repo = _BotSettingsRepositorySpy()
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+        repository=repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    query = _CallbackQuery(data="ops:cfg:ready", chat_id=-10077, topic_id=55)
+    await handler(query)
+
+    assert repo.row.group_chat_id == -10077
+    assert repo.row.ready_topic_id == 55
+    assert publisher.edits
+    assert "Последнее действие: ready_topic_id=55" in publisher.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ops_setup_cfg_requires_topic() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    repo = _BotSettingsRepositorySpy()
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+        repository=repo,
+        session_factory=_dummy_session_factory,
+    )
+
+    query = _CallbackQuery(data="ops:cfg:ready", chat_id=-10077, topic_id=None)
+    await handler(query)
+
+    assert query.answers
+    assert "Действие доступно только в topic" in [value for value in query.answers if value]
+    assert repo.row.ready_topic_id is None
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_source_toggle_happy_path() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    source = SimpleNamespace(id=1, enabled=False, trust_score=0.7, name="Source 1", url="https://a.example/rss")
+    repo = _SourceRepositorySpy(rows=[source], by_id={1: source})
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+        source_repository=repo,
+    )
+
+    query = _CallbackQuery(data="ops:src:tgl:1:1")
+    await handler(query)
+
+    assert source.enabled is True
+    assert publisher.sent
+    assert "Источник #1 переключен: ON" in publisher.sent[-1]["text"]
+    assert publisher.edits
+    assert "#1 [ON]" in publisher.edits[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ops_menu_source_toggle_failure_when_missing() -> None:
+    publisher = _PublisherSpy()
+    ingestion = _IngestionRunnerSpy()
+    repo = _SourceRepositorySpy(rows=[], by_id={})
+    _, handler = _router_and_callback_handler(
+        publisher=publisher,
+        ingestion=ingestion,
+        source_repository=repo,
+    )
+
+    query = _CallbackQuery(data="ops:src:tgl:99:1")
+    await handler(query)
+
+    assert publisher.sent
+    assert "Источник #99 не найден." in publisher.sent[-1]["text"]
 
 
 @pytest.mark.asyncio

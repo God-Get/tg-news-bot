@@ -80,6 +80,16 @@ class TrendDiscoverySettings(BaseModel):
     max_sources_per_topic: int = Field(6, ge=1, le=30)
     min_topic_score: float = Field(2.0, ge=0.0, le=100.0)
     article_snippet_chars: int = Field(280, ge=80, le=1200)
+    github_trending_enabled: bool = True
+    github_trending_url: str = "https://github.com/trending"
+    steam_charts_enabled: bool = True
+    steam_charts_url: str = "https://steamcharts.com/top"
+    boxoffice_enabled: bool = True
+    boxoffice_urls: list[str] = Field(
+        default_factory=lambda: [
+            "https://www.boxofficemojo.com/month/",
+        ]
+    )
     ai_enrichment: bool = True
     auto_ingest_min_score: float = Field(4.0, ge=0.0, le=100.0)
     auto_add_source_min_score: float = Field(4.0, ge=0.0, le=100.0)
@@ -146,6 +156,82 @@ class TrendDiscoverySettings(BaseModel):
                 ],
                 min_article_score=1.2,
             ),
+            TrendDiscoveryProfileSettings(
+                name="Gaming",
+                seed_keywords=[
+                    "game",
+                    "gaming",
+                    "steam",
+                    "playstation",
+                    "xbox",
+                    "nintendo",
+                    "esports",
+                    "trailer",
+                    "unreal engine",
+                ],
+                exclude_keywords=["casino", "betting", "giveaway"],
+                min_article_score=1.2,
+            ),
+            TrendDiscoveryProfileSettings(
+                name="Movies",
+                seed_keywords=[
+                    "movie",
+                    "film",
+                    "box office",
+                    "cinema",
+                    "trailer",
+                    "director",
+                    "hollywood",
+                    "streaming release",
+                ],
+                exclude_keywords=["gossip", "celebrity rumor"],
+                min_article_score=1.1,
+            ),
+            TrendDiscoveryProfileSettings(
+                name="Quantum Computing",
+                seed_keywords=[
+                    "quantum computing",
+                    "qubit",
+                    "quantum processor",
+                    "quantum network",
+                    "quantum error correction",
+                    "ion trap",
+                    "superconducting qubit",
+                ],
+                exclude_keywords=["quantum healing", "esoteric"],
+                min_article_score=1.3,
+            ),
+            TrendDiscoveryProfileSettings(
+                name="Programming",
+                seed_keywords=[
+                    "programming",
+                    "developer",
+                    "framework",
+                    "release notes",
+                    "open source",
+                    "github",
+                    "compiler",
+                    "language update",
+                    "api",
+                ],
+                exclude_keywords=["bootcamp ad", "course discount"],
+                min_article_score=1.15,
+            ),
+            TrendDiscoveryProfileSettings(
+                name="Gadgets",
+                seed_keywords=[
+                    "smartphone",
+                    "laptop",
+                    "wearable",
+                    "chipset",
+                    "camera sensor",
+                    "headset",
+                    "consumer electronics",
+                    "benchmark",
+                ],
+                exclude_keywords=["accessories sale", "coupon"],
+                min_article_score=1.1,
+            ),
         ]
     )
 
@@ -188,6 +274,9 @@ class InternetScoringSettings(BaseModel):
             "HN": 1.0,
             "REDDIT": 0.9,
             "X": 0.8,
+            "GITHUB": 1.05,
+            "STEAM_CHARTS": 1.0,
+            "BOXOFFICE": 0.95,
             "GOOGLE_TRENDS": 1.1,
             "WORDSTAT": 1.0,
         }
