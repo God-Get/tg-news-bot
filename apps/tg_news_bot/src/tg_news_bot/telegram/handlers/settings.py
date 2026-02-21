@@ -611,6 +611,11 @@ def create_settings_router(context: SettingsContext) -> Router:
 
         launch_background_job(job_name=job_name, coro=_job())
 
+    async def maybe_reopen_ops_menu(*, chat_id: int, topic_id: int | None) -> None:
+        if menu_scope_key(chat_id, topic_id) not in ops_menu_messages:
+            return
+        await open_ops_menu(chat_id=chat_id, topic_id=topic_id)
+
     def build_ops_menu_keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -2214,44 +2219,50 @@ def create_settings_router(context: SettingsContext) -> Router:
     async def list_sources(message: Message) -> None:
         if not is_admin(message):
             return
-        async with context.session_factory() as session:
-            async with session.begin():
-                sources = await context.source_repository.list_all(session)
-        if not sources:
-            await context.publisher.send_text(
+        try:
+            async with context.session_factory() as session:
+                async with session.begin():
+                    sources = await context.source_repository.list_all(session)
+            if not sources:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Источники не настроены.",
+                )
+                return
+            lines = [
+                f"Источники: {len(sources)}",
+            ]
+            for item in sources:
+                state = "ON" if item.enabled else "OFF"
+                lines.append(
+                    f"#{item.id} [{state}] trust={float(item.trust_score or 0.0):.2f} {item.name}"
+                )
+                lines.append(item.url)
+                topics = []
+                if isinstance(item.tags, dict):
+                    raw_topics = item.tags.get("topics")
+                    if isinstance(raw_topics, list):
+                        topics = [str(topic) for topic in raw_topics if str(topic).strip()]
+                if topics:
+                    lines.append(f"topics: {', '.join(topics)}")
+                if isinstance(item.tags, dict):
+                    ssl_flag = item.tags.get("allow_insecure_ssl")
+                    if isinstance(ssl_flag, bool):
+                        lines.append(f"allow_insecure_ssl: {str(ssl_flag).lower()}")
+                    quality = item.tags.get("quality")
+                    if isinstance(quality, dict):
+                        lines.append(f"quality_events: {quality.get('events_total', 0)}")
+            await send_paged_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Источники не настроены.",
+                text="\n".join(lines),
             )
-            return
-        lines = [
-            f"Источники: {len(sources)}",
-        ]
-        for item in sources:
-            state = "ON" if item.enabled else "OFF"
-            lines.append(
-                f"#{item.id} [{state}] trust={float(item.trust_score or 0.0):.2f} {item.name}"
+        finally:
+            await maybe_reopen_ops_menu(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
             )
-            lines.append(item.url)
-            topics = []
-            if isinstance(item.tags, dict):
-                raw_topics = item.tags.get("topics")
-                if isinstance(raw_topics, list):
-                    topics = [str(topic) for topic in raw_topics if str(topic).strip()]
-            if topics:
-                lines.append(f"topics: {', '.join(topics)}")
-            if isinstance(item.tags, dict):
-                ssl_flag = item.tags.get("allow_insecure_ssl")
-                if isinstance(ssl_flag, bool):
-                    lines.append(f"allow_insecure_ssl: {str(ssl_flag).lower()}")
-                quality = item.tags.get("quality")
-                if isinstance(quality, dict):
-                    lines.append(f"quality_events: {quality.get('events_total', 0)}")
-        await send_paged_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text="\n".join(lines),
-        )
 
     @router.message(Command("set_source_topics"))
     async def set_source_topics(message: Message, command: CommandObject) -> None:
@@ -2559,99 +2570,111 @@ def create_settings_router(context: SettingsContext) -> Router:
     async def ingest_source(message: Message, command: CommandObject) -> None:
         if not is_admin(message):
             return
-        if context.ingestion_runner is None:
-            await context.publisher.send_text(
-                chat_id=message.chat.id,
-                topic_id=message.message_thread_id,
-                text="Ingestion недоступен в текущей конфигурации.",
-            )
-            return
-        if not command.args:
-            await context.publisher.send_text(
-                chat_id=message.chat.id,
-                topic_id=message.message_thread_id,
-                text="Формат: /ingest_source <source_id>",
-            )
-            return
         try:
-            source_id = int(command.args.strip())
-        except ValueError:
+            if context.ingestion_runner is None:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Ingestion недоступен в текущей конфигурации.",
+                )
+                return
+            if not command.args:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Формат: /ingest_source <source_id>",
+                )
+                return
+            try:
+                source_id = int(command.args.strip())
+            except ValueError:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="source_id должен быть числом.",
+                )
+                return
+            async with context.session_factory() as session:
+                async with session.begin():
+                    source = await context.source_repository.get_by_id(session, source_id)
+                    if not source:
+                        await context.publisher.send_text(
+                            chat_id=message.chat.id,
+                            topic_id=message.message_thread_id,
+                            text=f"Источник #{source_id} не найден.",
+                        )
+                        return
+                    if not source.enabled:
+                        await context.publisher.send_text(
+                            chat_id=message.chat.id,
+                            topic_id=message.message_thread_id,
+                            text=f"Источник #{source_id} выключен. Включите /enable_source {source_id}",
+                        )
+                        return
+                    source_name = source.name
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="source_id должен быть числом.",
+                text=f"Запускаю RSS ingestion для #{source_id} ({source_name})...",
             )
-            return
-        async with context.session_factory() as session:
-            async with session.begin():
-                source = await context.source_repository.get_by_id(session, source_id)
-                if not source:
-                    await context.publisher.send_text(
-                        chat_id=message.chat.id,
-                        topic_id=message.message_thread_id,
-                        text=f"Источник #{source_id} не найден.",
-                    )
-                    return
-                if not source.enabled:
-                    await context.publisher.send_text(
-                        chat_id=message.chat.id,
-                        topic_id=message.message_thread_id,
-                        text=f"Источник #{source_id} выключен. Включите /enable_source {source_id}",
-                    )
-                    return
-                source_name = source.name
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text=f"Запускаю RSS ingestion для #{source_id} ({source_name})...",
-        )
-        try:
-            stats = await context.ingestion_runner.run_once(source_ids={source_id})
-        except Exception:
-            log.exception("settings.ingest_source_failed", source_id=source_id)
+            try:
+                stats = await context.ingestion_runner.run_once(source_ids={source_id})
+            except Exception:
+                log.exception("settings.ingest_source_failed", source_id=source_id)
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Ошибка запуска ingestion. Смотри логи контейнера.",
+                )
+                return
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Ошибка запуска ingestion. Смотри логи контейнера.",
+                text=render_ingestion_stats(stats),
             )
-            return
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text=render_ingestion_stats(stats),
-        )
+        finally:
+            await maybe_reopen_ops_menu(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+            )
 
     @router.message(Command("ingest_now"))
     async def ingest_now(message: Message) -> None:
         if not is_admin(message):
             return
-        if context.ingestion_runner is None:
-            await context.publisher.send_text(
-                chat_id=message.chat.id,
-                topic_id=message.message_thread_id,
-                text="Ingestion недоступен в текущей конфигурации.",
-            )
-            return
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text="Запускаю RSS ingestion...",
-        )
         try:
-            stats = await context.ingestion_runner.run_once()
-        except Exception:
-            log.exception("settings.ingest_now_failed")
+            if context.ingestion_runner is None:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Ingestion недоступен в текущей конфигурации.",
+                )
+                return
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Ошибка запуска ingestion. Смотри логи контейнера.",
+                text="Запускаю RSS ingestion...",
             )
-            return
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text=render_ingestion_stats(stats),
-        )
+            try:
+                stats = await context.ingestion_runner.run_once()
+            except Exception:
+                log.exception("settings.ingest_now_failed")
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Ошибка запуска ingestion. Смотри логи контейнера.",
+                )
+                return
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=render_ingestion_stats(stats),
+            )
+        finally:
+            await maybe_reopen_ops_menu(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+            )
 
     @router.message(Command("ingest_url"))
     async def ingest_url(message: Message, command: CommandObject) -> None:
@@ -2895,78 +2918,84 @@ def create_settings_router(context: SettingsContext) -> Router:
         if not is_admin(message):
             return
 
-        source_id = parse_positive_int(command.args if command and command.args else None)
+        try:
+            source_id = parse_positive_int(command.args if command and command.args else None)
 
-        def quality_health(tags: dict | None) -> tuple[dict, dict]:
-            payload = tags if isinstance(tags, dict) else {}
-            quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
-            health = quality.get("health") if isinstance(quality.get("health"), dict) else {}
-            return quality, health
+            def quality_health(tags: dict | None) -> tuple[dict, dict]:
+                payload = tags if isinstance(tags, dict) else {}
+                quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+                health = quality.get("health") if isinstance(quality.get("health"), dict) else {}
+                return quality, health
 
-        async with context.session_factory() as session:
-            async with session.begin():
-                if source_id is not None:
-                    source = await context.source_repository.get_by_id(session, source_id)
-                    if source is None:
+            async with context.session_factory() as session:
+                async with session.begin():
+                    if source_id is not None:
+                        source = await context.source_repository.get_by_id(session, source_id)
+                        if source is None:
+                            await context.publisher.send_text(
+                                chat_id=message.chat.id,
+                                topic_id=message.message_thread_id,
+                                text=f"Источник #{source_id} не найден.",
+                            )
+                            return
+                        quality, health = quality_health(source.tags)
                         await context.publisher.send_text(
                             chat_id=message.chat.id,
                             topic_id=message.message_thread_id,
-                            text=f"Источник #{source_id} не найден.",
+                            text=(
+                                f"Source health #{source.id}: {source.name}\n"
+                                f"enabled: {source.enabled}\n"
+                                f"trust_score: {float(source.trust_score or 0.0):.2f}\n"
+                                f"events_total: {quality.get('events_total', 0)}\n"
+                                f"last_event: {quality.get('last_event', '-')}\n"
+                                f"consecutive_failures: {health.get('consecutive_failures', 0)}\n"
+                                f"rss_http_errors: {health.get('rss_http_errors', 0)}\n"
+                                f"rss_http_403: {health.get('rss_http_403', 0)}\n"
+                                f"rss_empty: {health.get('rss_empty', 0)}\n"
+                                f"duplicates_total: {health.get('duplicates_total', 0)}\n"
+                                f"high_duplicate_rate_hits: {health.get('high_duplicate_rate_hits', 0)}"
+                            ),
                         )
                         return
-                    quality, health = quality_health(source.tags)
-                    await context.publisher.send_text(
-                        chat_id=message.chat.id,
-                        topic_id=message.message_thread_id,
-                        text=(
-                            f"Source health #{source.id}: {source.name}\n"
-                            f"enabled: {source.enabled}\n"
-                            f"trust_score: {float(source.trust_score or 0.0):.2f}\n"
-                            f"events_total: {quality.get('events_total', 0)}\n"
-                            f"last_event: {quality.get('last_event', '-')}\n"
-                            f"consecutive_failures: {health.get('consecutive_failures', 0)}\n"
-                            f"rss_http_errors: {health.get('rss_http_errors', 0)}\n"
-                            f"rss_http_403: {health.get('rss_http_403', 0)}\n"
-                            f"rss_empty: {health.get('rss_empty', 0)}\n"
-                            f"duplicates_total: {health.get('duplicates_total', 0)}\n"
-                            f"high_duplicate_rate_hits: {health.get('high_duplicate_rate_hits', 0)}"
-                        ),
-                    )
-                    return
-                sources = await context.source_repository.list_all(session)
+                    sources = await context.source_repository.list_all(session)
 
-        if not sources:
-            await context.publisher.send_text(
+            if not sources:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Источники не найдены.",
+                )
+                return
+
+            scored_rows: list[tuple[float, object, dict, dict]] = []
+            for source in sources:
+                quality, health = quality_health(source.tags)
+                failures = float(health.get("consecutive_failures", 0))
+                events = float(quality.get("events_total", 0))
+                trust = float(source.trust_score or 0.0)
+                risk = failures * 2.0 + max(-trust, 0.0) + min(events / 25.0, 2.0)
+                scored_rows.append((risk, source, quality, health))
+
+            scored_rows.sort(key=lambda item: item[0], reverse=True)
+            lines = [f"Source health: {len(scored_rows)} (top risk)"]
+            for risk, source, quality, health in scored_rows[:25]:
+                lines.append(
+                    f"#{source.id} risk={risk:.2f} enabled={source.enabled} "
+                    f"trust={float(source.trust_score or 0.0):.2f} "
+                    f"fails={health.get('consecutive_failures', 0)} "
+                    f"event={quality.get('last_event', '-')} {source.name}"
+                )
+
+            await send_paged_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Источники не найдены.",
+                text="\n".join(lines),
             )
-            return
-
-        scored_rows: list[tuple[float, object, dict, dict]] = []
-        for source in sources:
-            quality, health = quality_health(source.tags)
-            failures = float(health.get("consecutive_failures", 0))
-            events = float(quality.get("events_total", 0))
-            trust = float(source.trust_score or 0.0)
-            risk = failures * 2.0 + max(-trust, 0.0) + min(events / 25.0, 2.0)
-            scored_rows.append((risk, source, quality, health))
-
-        scored_rows.sort(key=lambda item: item[0], reverse=True)
-        lines = [f"Source health: {len(scored_rows)} (top risk)"]
-        for risk, source, quality, health in scored_rows[:25]:
-            lines.append(
-                f"#{source.id} risk={risk:.2f} enabled={source.enabled} "
-                f"trust={float(source.trust_score or 0.0):.2f} "
-                f"fails={health.get('consecutive_failures', 0)} "
-                f"event={quality.get('last_event', '-')} {source.name}"
+        finally:
+            await maybe_reopen_ops_menu(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
             )
-
-        await send_paged_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text="\n".join(lines),
-        )
 
     @router.message(Command("scheduled_failed_list"))
     async def scheduled_failed_list(message: Message, command: CommandObject) -> None:
@@ -3359,37 +3388,43 @@ def create_settings_router(context: SettingsContext) -> Router:
     async def collect_trends(message: Message) -> None:
         if not is_admin(message):
             return
-        if context.trend_collector is None:
-            await context.publisher.send_text(
-                chat_id=message.chat.id,
-                topic_id=message.message_thread_id,
-                text="Сборщик трендов недоступен.",
-            )
-            return
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text="Собираю тренды...",
-        )
         try:
-            stats = await context.trend_collector.collect_once()
-        except Exception:
-            log.exception("settings.collect_trends_failed")
+            if context.trend_collector is None:
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Сборщик трендов недоступен.",
+                )
+                return
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Ошибка сбора трендов. Смотри логи.",
+                text="Собираю тренды...",
             )
-            return
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text=(
-                f"Тренды обновлены.\n"
-                f"добавлено сигналов: {stats.inserted}\n"
-                f"ключевых слов: {stats.keywords_total}"
-            ),
-        )
+            try:
+                stats = await context.trend_collector.collect_once()
+            except Exception:
+                log.exception("settings.collect_trends_failed")
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Ошибка сбора трендов. Смотри логи.",
+                )
+                return
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=(
+                    f"Тренды обновлены.\n"
+                    f"добавлено сигналов: {stats.inserted}\n"
+                    f"ключевых слов: {stats.keywords_total}"
+                ),
+            )
+        finally:
+            await maybe_reopen_ops_menu(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+            )
 
     @router.message(Command("trends"))
     async def trends(message: Message, command: CommandObject) -> None:
@@ -3437,61 +3472,67 @@ def create_settings_router(context: SettingsContext) -> Router:
     async def trend_scan(message: Message, command: CommandObject) -> None:
         if not is_admin(message):
             return
-        if context.trend_discovery is None:
-            await context.publisher.send_text(
-                chat_id=message.chat.id,
-                topic_id=message.message_thread_id,
-                text="Модуль trend discovery недоступен в текущей конфигурации.",
-            )
-            return
-        hours: int | None = None
-        limit: int | None = None
-        if command and command.args:
-            parts = command.args.strip().split()
-            if len(parts) >= 1:
-                hours = parse_positive_int(parts[0])
-            if len(parts) >= 2:
-                limit = parse_positive_int(parts[1])
-            if len(parts) > 2:
-                hours = None
-                limit = None
-            if (len(parts) >= 1 and hours is None) or (len(parts) >= 2 and limit is None):
+        try:
+            if context.trend_discovery is None:
                 await context.publisher.send_text(
                     chat_id=message.chat.id,
                     topic_id=message.message_thread_id,
-                    text="Формат: /trend_scan [hours] [limit]",
+                    text="Модуль trend discovery недоступен в текущей конфигурации.",
                 )
                 return
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text="Запускаю сканирование трендов...",
-        )
-        try:
-            result = await context.trend_discovery.scan(hours=hours, limit=limit)
-        except Exception:
-            log.exception("settings.trend_scan_failed")
+            hours: int | None = None
+            limit: int | None = None
+            if command and command.args:
+                parts = command.args.strip().split()
+                if len(parts) >= 1:
+                    hours = parse_positive_int(parts[0])
+                if len(parts) >= 2:
+                    limit = parse_positive_int(parts[1])
+                if len(parts) > 2:
+                    hours = None
+                    limit = None
+                if (len(parts) >= 1 and hours is None) or (len(parts) >= 2 and limit is None):
+                    await context.publisher.send_text(
+                        chat_id=message.chat.id,
+                        topic_id=message.message_thread_id,
+                        text="Формат: /trend_scan [hours] [limit]",
+                    )
+                    return
             await context.publisher.send_text(
                 chat_id=message.chat.id,
                 topic_id=message.message_thread_id,
-                text="Ошибка сканирования трендов. Смотри логи.",
+                text="Запускаю сканирование трендов...",
             )
-            return
-        await context.publisher.send_text(
-            chat_id=message.chat.id,
-            topic_id=message.message_thread_id,
-            text=(
-                f"Сканирование трендов завершено.\n"
-                f"режим: {result.mode}\n"
-                f"проанализировано материалов: {result.scanned_items}\n"
-                f"создано тем: {result.topics_created}\n"
-                f"кандидатов статей: {result.article_candidates}\n"
-                f"кандидатов источников: {result.source_candidates}\n"
-                f"отправлено сообщений в topic: {result.announced_messages}\n"
-                f"авто-добавлено во входящие: {result.auto_ingested}\n"
-                f"авто-добавлено источников: {result.auto_sources_added}"
-            ),
-        )
+            try:
+                result = await context.trend_discovery.scan(hours=hours, limit=limit)
+            except Exception:
+                log.exception("settings.trend_scan_failed")
+                await context.publisher.send_text(
+                    chat_id=message.chat.id,
+                    topic_id=message.message_thread_id,
+                    text="Ошибка сканирования трендов. Смотри логи.",
+                )
+                return
+            await context.publisher.send_text(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+                text=(
+                    f"Сканирование трендов завершено.\n"
+                    f"режим: {result.mode}\n"
+                    f"проанализировано материалов: {result.scanned_items}\n"
+                    f"создано тем: {result.topics_created}\n"
+                    f"кандидатов статей: {result.article_candidates}\n"
+                    f"кандидатов источников: {result.source_candidates}\n"
+                    f"отправлено сообщений в topic: {result.announced_messages}\n"
+                    f"авто-добавлено во входящие: {result.auto_ingested}\n"
+                    f"авто-добавлено источников: {result.auto_sources_added}"
+                ),
+            )
+        finally:
+            await maybe_reopen_ops_menu(
+                chat_id=message.chat.id,
+                topic_id=message.message_thread_id,
+            )
 
     @router.message(Command("trend_profile_add"))
     async def trend_profile_add(message: Message, command: CommandObject) -> None:

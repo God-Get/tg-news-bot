@@ -450,6 +450,13 @@ def _router_and_callback_handler(
     raise AssertionError("callback handler not found: ops_menu_action")
 
 
+def _message_handler(router, name: str):  # noqa: ANN001
+    for handler in router.message.handlers:
+        if handler.callback.__name__ == name:
+            return handler.callback
+    raise AssertionError(f"handler not found: {name}")
+
+
 @pytest.mark.asyncio
 async def test_commands_help_contains_syntax_lines() -> None:
     publisher = _PublisherSpy()
@@ -538,6 +545,78 @@ async def test_menu_reopens_without_old_tail_message() -> None:
 
     assert len(publisher.sent) == 2
     assert publisher.deleted == [{"chat_id": -1001, "message_id": first_menu_message_id}]
+
+
+@pytest.mark.asyncio
+async def test_list_sources_reopens_menu_to_bottom_when_menu_active() -> None:
+    publisher = _PublisherSpy()
+    source_rows = [
+        SimpleNamespace(
+            id=1,
+            enabled=True,
+            trust_score=1.0,
+            name="Source 1",
+            url="https://example.com/rss",
+            tags={"topics": ["ai"]},
+        )
+    ]
+    context = SettingsContext(
+        settings=SimpleNamespace(
+            admin_user_id=10,
+            trend_discovery=SimpleNamespace(default_window_hours=24, mode="suggest"),
+            analytics=SimpleNamespace(default_window_hours=24, max_window_hours=240),
+            post_formatting=SimpleNamespace(hashtag_mode="both"),
+            scheduler=SimpleNamespace(timezone="UTC"),
+            internet_scoring=SimpleNamespace(enabled=True),
+        ),
+        session_factory=_dummy_session_factory,
+        repository=_BotSettingsRepositorySpy(),
+        source_repository=_SourceRepositorySpy(rows=source_rows),
+        publisher=publisher,
+        ingestion_runner=_IngestionRunnerSpy(),
+        workflow=SimpleNamespace(),
+    )
+    router = create_settings_router(context)
+    menu_handler = _message_handler(router, "menu")
+    list_sources_handler = _message_handler(router, "list_sources")
+
+    message = _Message(chat_id=-1001, topic_id=7)
+    await menu_handler(message)
+    await list_sources_handler(message)
+
+    assert len(publisher.sent) >= 3
+    assert publisher.sent[-1]["text"].startswith("Операционный центр")
+
+
+@pytest.mark.asyncio
+async def test_ingest_now_reopens_menu_to_bottom_when_menu_active() -> None:
+    publisher = _PublisherSpy()
+    context = SettingsContext(
+        settings=SimpleNamespace(
+            admin_user_id=10,
+            trend_discovery=SimpleNamespace(default_window_hours=24, mode="suggest"),
+            analytics=SimpleNamespace(default_window_hours=24, max_window_hours=240),
+            post_formatting=SimpleNamespace(hashtag_mode="both"),
+            scheduler=SimpleNamespace(timezone="UTC"),
+            internet_scoring=SimpleNamespace(enabled=True),
+        ),
+        session_factory=_dummy_session_factory,
+        repository=_BotSettingsRepositorySpy(),
+        source_repository=_SourceRepositorySpy(),
+        publisher=publisher,
+        ingestion_runner=_IngestionRunnerSpy(),
+        workflow=SimpleNamespace(),
+    )
+    router = create_settings_router(context)
+    menu_handler = _message_handler(router, "menu")
+    ingest_now_handler = _message_handler(router, "ingest_now")
+
+    message = _Message(chat_id=-1001, topic_id=7)
+    await menu_handler(message)
+    await ingest_now_handler(message)
+
+    assert len(publisher.sent) >= 4
+    assert publisher.sent[-1]["text"].startswith("Операционный центр")
 
 
 @pytest.mark.asyncio
